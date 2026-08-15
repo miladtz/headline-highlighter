@@ -7,19 +7,38 @@ New-Item -ItemType Directory -Force -Path $vendor | Out-Null
 
 # Download FFmpeg.
 $ffmpegZip = Join-Path $env:TEMP 'ffmpeg.zip'
-Invoke-WebRequest 'https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.zip' -OutFile $ffmpegZip
-Expand-Archive -Force $ffmpegZip (Join-Path $env:TEMP 'ffmpeg-unpack')
-$ffmpeg = Get-ChildItem (Join-Path $env:TEMP 'ffmpeg-unpack') -Recurse -Filter ffmpeg.exe | Select-Object -First 1
+$ffmpegUnpack = Join-Path $env:TEMP 'ffmpeg-unpack'
+
+Invoke-WebRequest `
+    'https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.zip' `
+    -OutFile $ffmpegZip
+
+Expand-Archive -Path $ffmpegZip -DestinationPath $ffmpegUnpack -Force
+
+$ffmpeg = Get-ChildItem $ffmpegUnpack -Recurse -Filter 'ffmpeg.exe' |
+    Select-Object -First 1
+
+if (-not $ffmpeg) {
+    throw 'FFmpeg download completed, but ffmpeg.exe was not found.'
+}
+
 Copy-Item $ffmpeg.FullName (Join-Path $vendor 'ffmpeg.exe') -Force
 
-# Download and silently install Tesseract.
+# Download Tesseract.
 $tesseractInstaller = Join-Path $env:TEMP 'tesseract-installer.exe'
-Invoke-WebRequest 'https://github.com/UB-Mannheim/tesseract/releases/download/v5.4.0.20240606/tesseract-ocr-w64-setup-5.4.0.20240606.exe' -OutFile $tesseractInstaller
 
+Invoke-WebRequest `
+    'https://github.com/UB-Mannheim/tesseract/releases/download/v5.4.0.20240606/tesseract-ocr-w64-setup-5.4.0.20240606.exe' `
+    -OutFile $tesseractInstaller
+
+# Install silently. Some installer versions ignore /D and use Program Files.
 $tesseractDir = Join-Path $vendor 'tesseract'
-Start-Process -FilePath $tesseractInstaller -ArgumentList @('/S', "/D=$tesseractDir") -Wait
 
-# Some installer versions ignore /D and use Program Files; bundle that copy instead.
+Start-Process `
+    -FilePath $tesseractInstaller `
+    -ArgumentList @('/S', "/D=$tesseractDir") `
+    -Wait
+
 $possibleLocations = @(
     $tesseractDir,
     (Join-Path $env:ProgramFiles 'Tesseract-OCR')
@@ -37,9 +56,15 @@ if (-not $installedDir) {
     throw 'Tesseract installer completed, but tesseract.exe was not found.'
 }
 
-if ((Resolve-Path $installedDir).Path -ne (Resolve-Path $tesseractDir).Path) {
+# Ensure PyInstaller receives Tesseract under vendor\tesseract.
+if ($installedDir -ne $tesseractDir) {
     New-Item -ItemType Directory -Force -Path $tesseractDir | Out-Null
-    Copy-Item -Path (Join-Path $installedDir '*') -Destination $tesseractDir -Recurse -Force
+
+    Copy-Item `
+        -Path (Join-Path $installedDir '*') `
+        -Destination $tesseractDir `
+        -Recurse `
+        -Force
 }
 
 if (-not (Test-Path (Join-Path $tesseractDir 'tesseract.exe'))) {
