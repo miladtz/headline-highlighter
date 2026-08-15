@@ -96,6 +96,13 @@ def detect_headline(lines: list[dict], image_height: int) -> list[dict]:
     return selected
 
 
+def headline_quality(lines: list[dict]) -> float:
+    """Rank alternate OCR passes; large, multi-line title text beats body copy."""
+    if not lines:
+        return -1.0
+    return sum(max(1, len(normalise(line["text"]))) * line["height"] for line in lines) + len(lines) * 140
+
+
 def find_manual_headline(lines: list[dict], headline: str) -> list[dict]:
     """Resolve a typed headline even when OCR drops or misreads a few words."""
     wanted = normalise(headline)
@@ -304,7 +311,7 @@ class App(TkinterDnD.Tk):
         super().__init__()
         configure_tools()
         self.title(APP_NAME); self.geometry("820x760"); self.minsize(720, 680)
-        self.image_path = ""; self.all_lines: list[dict] = []; self.headline_lines: list[dict] = []; self.highlight_items: list[dict] = []
+        self.image_path = ""; self.all_lines: list[dict] = []; self.ocr_variants: list[list[dict]] = []; self.headline_lines: list[dict] = []; self.highlight_items: list[dict] = []
         self.values = self.load_settings()
         self.line_time = tk.StringVar(value=str(self.values.get("line_time", 0.8)))
         self.gap = tk.StringVar(value=str(self.values.get("gap", 0.18)))
@@ -329,7 +336,7 @@ class App(TkinterDnD.Tk):
         ttk.Label(outer, text=APP_NAME, font=("Segoe UI", 18, "bold")).pack(anchor="w")
         ttk.Label(outer, text="Drop a screenshot below or choose one. The headline is found automatically.").pack(anchor="w", pady=(0, 10))
         self.drop = tk.Label(outer, text="Drop screenshot here, click Browse, or click here and press Ctrl+V", height=5, relief="groove", bg="#f3f6fb", font=("Segoe UI", 11))
-        self.drop.pack(fill="x"); self.drop.drop_target_register(DND_FILES); self.drop.dnd_bind("<<Drop>>", self.on_drop); self.drop.bind("<Button-1>", lambda _e: self.browse())
+        self.drop.pack(fill="x"); self.drop.drop_target_register(DND_FILES); self.drop.dnd_bind("<<Drop>>", self.on_drop); self.drop.bind("<Button-1>", self.focus_paste_area)
         self.drop.bind("<Control-v>", self.paste_image); self.drop.bind("<Control-V>", self.paste_image)
         ttk.Button(outer, text="Browse…", command=self.browse).pack(anchor="e", pady=6)
         self.status = ttk.Label(outer, text="No screenshot selected.", wraplength=700); self.status.pack(anchor="w")
@@ -363,6 +370,10 @@ class App(TkinterDnD.Tk):
         ttk.Button(buttons, text="Exit", command=self.destroy).pack(side="right")
 
     def on_drop(self, event): self.open_image(clean_drop_path(event.data))
+    def focus_paste_area(self, _event=None):
+        self.drop.focus_set()
+        self.status.configure(text="Paste area selected. Press Ctrl+V to paste a screenshot, or use Browse to select a file.")
+        return "break"
     def paste_image(self, _event=None):
         try:
             pasted = ImageGrab.grabclipboard()
@@ -389,7 +400,11 @@ class App(TkinterDnD.Tk):
         try:
             image = Image.open(path); image.verify(); image = Image.open(path).convert("RGB")
             self.image_path = path; self.status.configure(text="Reading headline with OCR…") ; self.update_idletasks()
-            self.all_lines = ocr_lines(image); self.headline_lines = detect_headline(self.all_lines, image.height)
+            # Sparse-text and document OCR modes each perform better on
+            # different screenshots. Choose the strongest headline result.
+            self.ocr_variants = [ocr_lines(image, psm) for psm in (11, 6, 3)]
+            choices = [(detect_headline(lines, image.height), lines) for lines in self.ocr_variants]
+            self.headline_lines, self.all_lines = max(choices, key=lambda choice: headline_quality(choice[0]))
             self.highlight_items = list(self.headline_lines)
             detected = " ".join(x["text"] for x in self.headline_lines)
             self.status.configure(text=f"Selected: {Path(path).name}\nDetected headline: {detected or 'No headline found — enter it above.'}")
@@ -399,18 +414,14 @@ class App(TkinterDnD.Tk):
             return False
         selected = self.headline_lines
         if self.manual_headline.get().strip():
-            selected = find_manual_headline(self.all_lines, self.manual_headline.get())
-            if not selected:
-                # Retry with a document-oriented segmentation mode before
-                # declaring the coordinate-free manual override unavailable.
-                retry = ocr_lines(Image.open(self.image_path).convert("RGB"), psm=6)
-                selected = find_manual_headline(retry, self.manual_headline.get())
-                if selected:
-                    self.all_lines = retry
-                else:
-                    self.status.configure(text="Manual headline was not found by OCR. Check spelling or use a clearer image.")
-                    self.highlight_items = []
-                    return False
+            matches = [(find_manual_headline(lines, self.manual_headline.get()), lines) for lines in self.ocr_variants]
+            selected, matched_lines = max(matches, key=lambda choice: headline_quality(choice[0]))
+            if selected:
+                self.all_lines = matched_lines
+            else:
+                self.status.configure(text="Manual headline was not found by OCR. Check spelling or use a clearer image.")
+                self.highlight_items = []
+                return False
         phrase_entries = [(phrase.get().strip(), color.get()) for phrase, color in self.phrase_rows if phrase.get().strip()]
         if phrase_entries:
             matched, missing = [], []
@@ -424,8 +435,8 @@ class App(TkinterDnD.Tk):
                 self.status.configure(text="Could not match phrase(s): " + ", ".join(missing))
                 self.highlight_items = []
                 return False
-            self.highlight_items = sorted(matched, key=lambda item: (item["box"][1], item["box"][0]))
-            self.status.configure(text=f"Highlighting {len(matched)} phrase segment(s) in reading order.")
+            self.highlight_items = matched
+            self.status.configure(text=f"Highlighting {len(matched)} phrase segment(s) in the order entered.")
         else:
             self.highlight_items = list(selected)
             self.status.configure(text="Highlighting the full headline line by line.")
