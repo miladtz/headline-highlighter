@@ -49,6 +49,14 @@ class HeadlineSelectionTests(unittest.TestCase):
         body = {"text": "This is paragraph text with lots of words", "box": (10, 220, 400, 236), "height": 16}
         self.assertIn(title, detect_headline([title, body], 600))
 
+    def test_detector_excludes_top_navigation_from_article_title(self):
+        navigation = {"text": "POLITICS U.S. NEWS WORLD LOCAL SPORTS BUSINESS HEALTH", "box": (0, 30, 800, 83), "height": 53}
+        first = {"text": "Woman arrested and facing felony charges in", "box": (200, 240, 1100, 300), "height": 60}
+        second = {"text": "World War II Memorial vandalism case DOJ", "box": (200, 310, 1100, 370), "height": 60}
+        third = {"text": "says", "box": (200, 380, 350, 440), "height": 60}
+        result = detect_headline([navigation, first, second, third], 700)
+        self.assertEqual(result, [first, second, third])
+
     def test_headline_quality_prefers_complete_multiline_title(self):
         complete = [
             {"text": "Woman arrested and facing felony charges in", "box": (0, 10, 600, 55), "height": 45},
