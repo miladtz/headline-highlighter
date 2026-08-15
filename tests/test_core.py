@@ -57,6 +57,11 @@ class HeadlineSelectionTests(unittest.TestCase):
         result = detect_headline([navigation, first, second, third], 700)
         self.assertEqual(result, [first, second, third])
 
+    def test_detector_keeps_an_ordinary_title_near_the_top(self):
+        title = {"text": "Britain and Houthi forces face a new crisis", "box": (20, 35, 720, 95), "height": 60}
+        body = {"text": "Additional article details appear below the headline", "box": (20, 180, 650, 205), "height": 25}
+        self.assertEqual(detect_headline([title, body], 700), [title])
+
     def test_headline_quality_prefers_complete_multiline_title(self):
         complete = [
             {"text": "Woman arrested and facing felony charges in", "box": (0, 10, 600, 55), "height": 45},
