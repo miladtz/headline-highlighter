@@ -34,4 +34,3 @@ jobs:
           name: HeadlineHighlighter-windows
           path: dist/HeadlineHighlighter.exe
           if-no-files-found: error
-
