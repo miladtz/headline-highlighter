@@ -152,6 +152,12 @@ def timestamped_destination(folder: str, filename: str, now: datetime | None = N
     return str(candidate)
 
 
+def source_copy_destination(source_path: str, video_destination: str) -> str:
+    """Store the input image beside its MP4 using the same timestamped stem."""
+    suffix = Path(source_path).suffix.lower() or ".png"
+    return str(Path(video_destination).with_suffix(suffix))
+
+
 def find_phrase_boxes(lines: list[dict], phrase_input: str) -> tuple[list[dict], list[str]]:
     """Find comma-separated phrases from OCR word boxes, returned in page order."""
     requested = [piece.strip() for piece in phrase_input.split(",") if piece.strip()]
@@ -311,7 +317,7 @@ class App(TkinterDnD.Tk):
         super().__init__()
         configure_tools()
         self.title(APP_NAME); self.geometry("820x760"); self.minsize(720, 680)
-        self.image_path = ""; self.all_lines: list[dict] = []; self.ocr_variants: list[list[dict]] = []; self.headline_lines: list[dict] = []; self.highlight_items: list[dict] = []
+        self.image_path = ""; self.all_lines: list[dict] = []; self.ocr_variants: list[list[dict]] = []; self.headline_variants: list[list[dict]] = []; self.headline_lines: list[dict] = []; self.detected_headline = ""; self.highlight_items: list[dict] = []
         self.values = self.load_settings()
         self.line_time = tk.StringVar(value=str(self.values.get("line_time", 0.8)))
         self.gap = tk.StringVar(value=str(self.values.get("gap", 0.18)))
@@ -403,37 +409,48 @@ class App(TkinterDnD.Tk):
             # Sparse-text and document OCR modes each perform better on
             # different screenshots. Choose the strongest headline result.
             self.ocr_variants = [ocr_lines(image, psm) for psm in (11, 6, 3)]
-            choices = [(detect_headline(lines, image.height), lines) for lines in self.ocr_variants]
+            self.headline_variants = [detect_headline(lines, image.height) for lines in self.ocr_variants]
+            choices = list(zip(self.headline_variants, self.ocr_variants))
             self.headline_lines, self.all_lines = max(choices, key=lambda choice: headline_quality(choice[0]))
             self.highlight_items = list(self.headline_lines)
             detected = " ".join(x["text"] for x in self.headline_lines)
+            self.detected_headline = detected
+            self.manual_headline.set(detected)
             self.status.configure(text=f"Selected: {Path(path).name}\nDetected headline: {detected or 'No headline found — enter it above.'}")
         except Exception as exc: messagebox.showerror(APP_NAME, f"Could not read that image or run OCR.\n\n{exc}")
     def apply_selection(self) -> bool:
         if not self.all_lines:
             return False
         selected = self.headline_lines
-        if self.manual_headline.get().strip():
+        manual_override = bool(self.manual_headline.get().strip()) and normalise(self.manual_headline.get()) != normalise(self.detected_headline)
+        if manual_override:
             matches = [(find_manual_headline(lines, self.manual_headline.get()), lines) for lines in self.ocr_variants]
             selected, matched_lines = max(matches, key=lambda choice: headline_quality(choice[0]))
             if selected:
                 self.all_lines = matched_lines
             else:
                 self.status.configure(text="Manual headline was not found by OCR. Check spelling or use a clearer image.")
-                self.highlight_items = []
                 return False
         phrase_entries = [(phrase.get().strip(), color.get()) for phrase, color in self.phrase_rows if phrase.get().strip()]
         if phrase_entries:
             matched, missing = [], []
             for phrase, phrase_color in phrase_entries:
-                matches, absent = find_phrase_boxes(selected, phrase)
-                missing.extend(absent)
+                # Automatic OCR may merge a small section label with the main
+                # title. Pick the OCR pass with the tightest phrase box.
+                if manual_override:
+                    phrase_options = [find_phrase_boxes(selected, phrase)]
+                else:
+                    phrase_options = [find_phrase_boxes(lines, phrase) for lines in self.headline_variants]
+                found = [option[0] for option in phrase_options if not option[1]]
+                if not found:
+                    missing.append(phrase)
+                    continue
+                matches = min(found, key=lambda result: sum((item["box"][2] - item["box"][0]) * (item["box"][3] - item["box"][1]) for item in result))
                 for match in matches:
                     match["color"] = phrase_color
                     matched.append(match)
             if missing:
                 self.status.configure(text="Could not match phrase(s): " + ", ".join(missing))
-                self.highlight_items = []
                 return False
             self.highlight_items = matched
             self.status.configure(text=f"Highlighting {len(matched)} phrase segment(s) in the order entered.")
@@ -468,7 +485,9 @@ class App(TkinterDnD.Tk):
         def task():
             try:
                 generate_video(self.image_path, self.highlight_items, line_time, gap, duration, self.color.get(), destination, lambda p: self.after(0, lambda: self.progress.configure(value=p)))
-                self.after(0, lambda: messagebox.showinfo(APP_NAME, f"Video created:\n{destination}"))
+                source_destination = source_copy_destination(self.image_path, destination)
+                shutil.copy2(self.image_path, source_destination)
+                self.after(0, lambda: messagebox.showinfo(APP_NAME, f"Video created:\n{destination}\n\nSource image saved:\n{source_destination}"))
             except Exception as exc:
                 # Exception variables are cleared at the end of an except block;
                 # bind the message now so Tk receives the actual failure detail.
