@@ -5,7 +5,7 @@ from unittest.mock import patch
 
 from PIL import Image
 
-from headline_highlighter import box_is_dark, clean_drop_path, detect_headline, find_manual_headline, find_phrase_boxes, normalise, timestamped_destination, zoom_frame
+from headline_highlighter import box_is_dark, clean_drop_path, detect_headline, find_manual_headline, find_phrase_boxes, headline_quality, normalise, timestamped_destination, zoom_frame
 
 
 class HeadlineSelectionTests(unittest.TestCase):
@@ -44,6 +44,15 @@ class HeadlineSelectionTests(unittest.TestCase):
         title = {"text": "The Main Headline", "box": (10, 30, 320, 80), "height": 50}
         body = {"text": "This is paragraph text with lots of words", "box": (10, 220, 400, 236), "height": 16}
         self.assertIn(title, detect_headline([title, body], 600))
+
+    def test_headline_quality_prefers_complete_multiline_title(self):
+        complete = [
+            {"text": "Woman arrested and facing felony charges in", "box": (0, 10, 600, 55), "height": 45},
+            {"text": "World War II Memorial vandalism case DOJ", "box": (0, 60, 600, 105), "height": 45},
+            {"text": "says", "box": (0, 110, 100, 155), "height": 45},
+        ]
+        partial = complete[:1]
+        self.assertGreater(headline_quality(complete), headline_quality(partial))
 
     def test_zoom_frame_keeps_video_dimensions(self):
         image = Image.new("RGBA", (101, 99), "white")
