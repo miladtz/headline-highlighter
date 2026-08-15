@@ -79,7 +79,9 @@ def detect_headline(lines: list[dict], image_height: int) -> list[dict]:
     for i, line in enumerate(candidates):
         # A top navigation bar is a short row containing many unrelated menu
         # labels. It should not outrank the large article title below it.
-        nav_penalty = 90 if line["box"][1] < image_height * .24 and len(line["text"].split()) >= 5 else 0
+        letters = [character for character in line["text"] if character.isalpha()]
+        uppercase_ratio = sum(character.isupper() for character in letters) / max(1, len(letters))
+        nav_penalty = 90 if (line["box"][1] < image_height * .24 and len(line["text"].split()) >= 5 and uppercase_ratio >= .78) else 0
         score = line["height"] * 3 + min(len(line["text"]), 90) * .25 - line["box"][1] / image_height * 12 - nav_penalty
         scored.append((score, i))
     _, best = max(scored)
