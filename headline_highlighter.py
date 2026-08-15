@@ -98,7 +98,7 @@ def find_manual_headline(lines: list[dict], headline: str) -> list[dict]:
         joined = ""
         for end in range(start, min(start + 5, len(lines))):
             joined += normalise(lines[end]["text"])
-            if wanted in joined or joined in wanted and len(joined) > 6:
+            if wanted in joined:
                 return lines[start:end + 1]
     return []
 
