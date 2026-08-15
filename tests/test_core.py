@@ -5,7 +5,7 @@ from unittest.mock import patch
 
 from PIL import Image
 
-from headline_highlighter import box_is_dark, clean_drop_path, detect_headline, find_manual_headline, find_phrase_boxes, headline_quality, normalise, timestamped_destination, zoom_frame
+from headline_highlighter import box_is_dark, clean_drop_path, detect_headline, find_manual_headline, find_phrase_boxes, headline_quality, normalise, source_copy_destination, timestamped_destination, zoom_frame
 
 
 class HeadlineSelectionTests(unittest.TestCase):
@@ -39,6 +39,10 @@ class HeadlineSelectionTests(unittest.TestCase):
         with patch("headline_highlighter.Path.exists", side_effect=[True, False]):
             second = Path(timestamped_destination("C:/videos", "my clip.mp4", now))
         self.assertEqual(second.name, "my clip_20260815_143005_2.mp4")
+
+    def test_source_copy_uses_the_video_stem_and_image_extension(self):
+        copied = Path(source_copy_destination("C:/input/news.png", "C:/videos/headline_20260815_143005.mp4"))
+        self.assertEqual(copied.name, "headline_20260815_143005.png")
 
     def test_detector_prefers_large_top_line(self):
         title = {"text": "The Main Headline", "box": (10, 30, 320, 80), "height": 50}
