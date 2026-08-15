@@ -98,7 +98,7 @@ def find_manual_headline(lines: list[dict], headline: str) -> list[dict]:
         joined = ""
         for end in range(start, min(start + 5, len(lines))):
             joined += normalise(lines[end]["text"])
-            if wanted in joined:
+            if wanted in joined or joined in wanted and len(joined) > 6:
                 return lines[start:end + 1]
     return []
 
@@ -137,7 +137,8 @@ def generate_video(image_path: str, lines: list[dict], line_time: float, gap: fl
             raise RuntimeError("Bundled FFmpeg is missing. Reinstall Headline Highlighter.")
         ffmpeg = found
     command = [ffmpeg, "-y", "-f", "rawvideo", "-vcodec", "rawvideo", "-pix_fmt", "rgba", "-s", f"{image.width}x{image.height}",
-               "-r", str(fps), "-i", "-", "-an", "-c:v", "libx264", "-pix_fmt", "yuv420p", "-movflags", "+faststart", destination]
+               "-r", str(fps), "-i", "-", "-an", "-vf", "pad=ceil(iw/2)*2:ceil(ih/2)*2",
+               "-c:v", "libx264", "-pix_fmt", "yuv420p", "-movflags", "+faststart", destination]
     process = subprocess.Popen(command, stdin=subprocess.PIPE, stderr=subprocess.PIPE)
     try:
         for frame in range(frames):
@@ -149,7 +150,13 @@ def generate_video(image_path: str, lines: list[dict], line_time: float, gap: fl
                 if f:
                     composed.alpha_composite(marker_layer(image.size, line["box"], color, f, n))
                 cursor += line_time + (gap if n < len(lines)-1 else 0)
-            process.stdin.write(composed.tobytes())
+            try:
+                process.stdin.write(composed.tobytes())
+            except BrokenPipeError:
+                errors = process.stderr.read().decode(errors="replace")
+                process.wait()
+                detail = errors[-1600:] or "FFmpeg ended before it could accept a video frame."
+                raise RuntimeError(f"FFmpeg could not create the MP4:\n{detail}") from None
             progress((frame + 1) / frames * 100)
         process.stdin.close()
         errors = process.stderr.read().decode(errors="replace")
@@ -258,7 +265,11 @@ class App(TkinterDnD.Tk):
             try:
                 generate_video(self.image_path, self.headline_lines, line_time, gap, duration, self.color.get(), destination, lambda p: self.after(0, lambda: self.progress.configure(value=p)))
                 self.after(0, lambda: messagebox.showinfo(APP_NAME, f"Video created:\n{destination}"))
-            except Exception as exc: self.after(0, lambda: messagebox.showerror(APP_NAME, str(exc)))
+            except Exception as exc:
+                # Exception variables are cleared at the end of an except block;
+                # bind the message now so Tk receives the actual failure detail.
+                error_text = str(exc) or repr(exc)
+                self.after(0, lambda message=error_text: messagebox.showerror(APP_NAME, message))
             finally: self.after(0, lambda: self.generate_button.configure(state="normal"))
         threading.Thread(target=task, daemon=True).start()
 
