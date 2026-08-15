@@ -75,22 +75,28 @@ def detect_headline(lines: list[dict], image_height: int) -> list[dict]:
     candidates = [line for line in lines if line["box"][1] < image_height * .65]
     if not candidates:
         return []
-    scored = []
-    for i, line in enumerate(candidates):
-        # A top navigation bar is a short row containing many unrelated menu
-        # labels. It should not outrank the large article title below it.
-        letters = [character for character in line["text"] if character.isalpha()]
-        uppercase_ratio = sum(character.isupper() for character in letters) / max(1, len(letters))
-        nav_penalty = 90 if (line["box"][1] < image_height * .24 and len(line["text"].split()) >= 5 and uppercase_ratio >= .78) else 0
-        score = line["height"] * 3 + min(len(line["text"]), 90) * .25 - line["box"][1] / image_height * 12 - nav_penalty
-        scored.append((score, i))
+    # Split the page into vertical text clusters. A site navigation bar and
+    # article headline have a large blank gap between them, while wrapped
+    # headline lines are close together. This avoids treating both as one
+    # headline even when one OCR mode gives the menu large bounding boxes.
+    clusters: list[list[dict]] = [[candidates[0]]]
+    for line in candidates[1:]:
+        previous = clusters[-1][-1]
+        gap = line["box"][1] - previous["box"][3]
+        if gap > max(previous["height"], line["height"]) * 2.2:
+            clusters.append([line])
+        else:
+            clusters[-1].append(line)
+    cluster = max(clusters, key=lambda group: sum(line["height"] ** 2 + len(normalise(line["text"])) * line["height"] * .2 for line in group))
+    scored = [(line["height"] * 3 + min(len(line["text"]), 90) * .25 - line["box"][1] / image_height * 12, i)
+              for i, line in enumerate(cluster)]
     _, best = max(scored)
-    selected = [candidates[best]]
+    selected = [cluster[best]]
     # Headlines commonly wrap on neighbouring lines of a comparable glyph size.
     for direction in (-1, 1):
         i = best + direction
-        while 0 <= i < len(candidates):
-            candidate = candidates[i]
+        while 0 <= i < len(cluster):
+            candidate = cluster[i]
             previous = selected[0] if direction < 0 else selected[-1]
             gap = abs(candidate["box"][1] - previous["box"][3])
             similar = .55 <= candidate["height"] / max(previous["height"], 1) <= 1.75
@@ -104,8 +110,8 @@ def detect_headline(lines: list[dict], image_height: int) -> list[dict]:
     # separated from the real title by a large blank hero area, so never let
     # a distant header row join the headline merely because its glyph height
     # happens to be similar in an OCR pass.
-    title_top = candidates[best]["box"][1]
-    title_height = candidates[best]["height"]
+    title_top = cluster[best]["box"][1]
+    title_height = cluster[best]["height"]
     selected = [line for line in selected if line["box"][1] >= title_top - title_height * 1.6]
     return selected
 
