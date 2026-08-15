@@ -75,8 +75,13 @@ def detect_headline(lines: list[dict], image_height: int) -> list[dict]:
     candidates = [line for line in lines if line["box"][1] < image_height * .65]
     if not candidates:
         return []
-    scored = [(line["height"] * 3 + min(len(line["text"]), 90) * .25 - line["box"][1] / image_height * 12, i)
-              for i, line in enumerate(candidates)]
+    scored = []
+    for i, line in enumerate(candidates):
+        # A top navigation bar is a short row containing many unrelated menu
+        # labels. It should not outrank the large article title below it.
+        nav_penalty = 90 if line["box"][1] < image_height * .24 and len(line["text"].split()) >= 5 else 0
+        score = line["height"] * 3 + min(len(line["text"]), 90) * .25 - line["box"][1] / image_height * 12 - nav_penalty
+        scored.append((score, i))
     _, best = max(scored)
     selected = [candidates[best]]
     # Headlines commonly wrap on neighbouring lines of a comparable glyph size.
@@ -93,6 +98,13 @@ def detect_headline(lines: list[dict], image_height: int) -> list[dict]:
                 i += direction
             else:
                 break
+    # Page navigation can be OCR'd as a very wide text line.  It is often
+    # separated from the real title by a large blank hero area, so never let
+    # a distant header row join the headline merely because its glyph height
+    # happens to be similar in an OCR pass.
+    title_top = candidates[best]["box"][1]
+    title_height = candidates[best]["height"]
+    selected = [line for line in selected if line["box"][1] >= title_top - title_height * 1.6]
     return selected
 
 
