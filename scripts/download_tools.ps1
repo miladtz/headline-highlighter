@@ -12,7 +12,7 @@ $ffmpeg = Get-ChildItem (Join-Path $env:TEMP 'ffmpeg-unpack') -Recurse -Filter f
 Copy-Item $ffmpeg.FullName (Join-Path $vendor 'ffmpeg.exe') -Force
 
 $tesseractInstaller = Join-Path $env:TEMP 'tesseract-installer.exe'
-Invoke-WebRequest 'https://digi.bib.uni-mannheim.de/tesseract/tesseract-ocr-w64-setup-5.5.0.20241111.exe' -OutFile $tesseractInstaller
+Invoke-WebRequest 'https://github.com/UB-Mannheim/tesseract/releases/download/v5.4.0.20240606/tesseract-ocr-w64-setup-5.4.0.20240606.exe' -OutFile $tesseractInstaller
 $tesseractDir = Join-Path $vendor 'tesseract'
 Start-Process -Wait -FilePath $tesseractInstaller -ArgumentList "/S /D=$tesseractDir"
 if (-not (Test-Path (Join-Path $tesseractDir 'tesseract.exe'))) { throw 'Tesseract download or extraction failed.' }
