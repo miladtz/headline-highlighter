@@ -9,13 +9,16 @@ import shutil
 import subprocess
 import sys
 import threading
+import tempfile
+from datetime import datetime
+from difflib import SequenceMatcher
 from pathlib import Path
 from typing import Iterable
 
 import tkinter as tk
 from tkinter import colorchooser, filedialog, messagebox, ttk
 
-from PIL import Image, ImageDraw, ImageFilter, ImageTk
+from PIL import Image, ImageDraw, ImageFilter, ImageGrab, ImageTk
 import pytesseract
 from tkinterdnd2 import DND_FILES, TkinterDnD
 
@@ -94,6 +97,7 @@ def detect_headline(lines: list[dict], image_height: int) -> list[dict]:
 
 
 def find_manual_headline(lines: list[dict], headline: str) -> list[dict]:
+    """Resolve a typed headline even when OCR drops or misreads a few words."""
     wanted = normalise(headline)
     if not wanted:
         return []
@@ -103,7 +107,42 @@ def find_manual_headline(lines: list[dict], headline: str) -> list[dict]:
             joined += normalise(lines[end]["text"])
             if wanted in joined:
                 return lines[start:end + 1]
-    return []
+
+    # OCR of large white type on a dark webpage can miss a word or split a
+    # word strangely.  Choose the strongest nearby run by word overlap plus
+    # sequence similarity rather than requiring a character-perfect match.
+    wanted_words = [normalise(word) for word in headline.split() if normalise(word)]
+    if len(wanted_words) < 2:
+        return []
+    best_score, best_lines = 0.0, []
+    wanted_set = set(wanted_words)
+    for start in range(len(lines)):
+        for end in range(start, min(start + 7, len(lines))):
+            candidate_text = " ".join(line["text"] for line in lines[start:end + 1])
+            candidate_words = [normalise(word) for word in candidate_text.split() if normalise(word)]
+            if not candidate_words:
+                continue
+            overlap = len(wanted_set & set(candidate_words)) / len(wanted_set)
+            similarity = SequenceMatcher(None, wanted, normalise(candidate_text)).ratio()
+            score = overlap * .7 + similarity * .3
+            if score > best_score:
+                best_score, best_lines = score, lines[start:end + 1]
+    # A long manually entered title should still resolve with several OCR
+    # mistakes, while avoiding accidental selection of unrelated body copy.
+    return best_lines if best_score >= .52 else []
+
+
+def timestamped_destination(folder: str, filename: str, now: datetime | None = None) -> str:
+    """Create a non-destructive, timestamped MP4 destination path."""
+    requested = Path(filename.strip() or "headline_highlight.mp4")
+    stem = requested.stem or "headline_highlight"
+    stamp = (now or datetime.now()).strftime("%Y%m%d_%H%M%S")
+    base = Path(folder).expanduser() / f"{stem}_{stamp}.mp4"
+    candidate, number = base, 2
+    while candidate.exists():
+        candidate = base.with_name(f"{base.stem}_{number}{base.suffix}")
+        number += 1
+    return str(candidate)
 
 
 def find_phrase_boxes(lines: list[dict], phrase_input: str) -> tuple[list[dict], list[str]]:
@@ -237,9 +276,10 @@ def generate_video(image_path: str, lines: list[dict], line_time: float, gap: fl
                 if f:
                     dark_background = box_is_dark(image, line["box"])
                     opacity = 38 if dark_background else 118
-                    composed.alpha_composite(marker_layer(image.size, line["box"], color, f, n, opacity))
+                    line_color = line.get("color", color)
+                    composed.alpha_composite(marker_layer(image.size, line["box"], line_color, f, n, opacity))
                     visible_box = (line["box"][0], line["box"][1], round(line["box"][0] + (line["box"][2] - line["box"][0]) * f), line["box"][3])
-                    preserve_text_appearance(composed, image, visible_box, color, dark_background)
+                    preserve_text_appearance(composed, image, visible_box, line_color, dark_background)
                 cursor += line_time + (gap if n < len(lines)-1 else 0)
             composed = zoom_frame(composed, focus, 1 + .08 * frame / max(1, frames - 1))
             try:
@@ -263,15 +303,17 @@ class App(TkinterDnD.Tk):
     def __init__(self):
         super().__init__()
         configure_tools()
-        self.title(APP_NAME); self.geometry("760x690"); self.minsize(650, 600)
+        self.title(APP_NAME); self.geometry("820x760"); self.minsize(720, 680)
         self.image_path = ""; self.all_lines: list[dict] = []; self.headline_lines: list[dict] = []; self.highlight_items: list[dict] = []
         self.values = self.load_settings()
         self.line_time = tk.StringVar(value=str(self.values.get("line_time", 0.8)))
         self.gap = tk.StringVar(value=str(self.values.get("gap", 0.18)))
         self.duration = tk.StringVar(value=str(self.values.get("duration", 5.0)))
         self.color = tk.StringVar(value=self.values.get("color", "#FFF200"))
-        self.manual_headline = tk.StringVar(); self.phrases = tk.StringVar(); self.filename = tk.StringVar(value="headline_highlight.mp4")
+        self.manual_headline = tk.StringVar(); self.filename = tk.StringVar(value="headline_highlight.mp4")
         self.folder = tk.StringVar(value=str(Path.home() / "Videos"))
+        self.phrase_rows = [(tk.StringVar(), tk.StringVar(value="#FFF200")) for _ in range(10)]
+        self.phrase_color_buttons: list[tk.Button] = []
         self.build_ui()
 
     def load_settings(self):
@@ -286,14 +328,23 @@ class App(TkinterDnD.Tk):
         outer = ttk.Frame(self, padding=16); outer.pack(fill="both", expand=True)
         ttk.Label(outer, text=APP_NAME, font=("Segoe UI", 18, "bold")).pack(anchor="w")
         ttk.Label(outer, text="Drop a screenshot below or choose one. The headline is found automatically.").pack(anchor="w", pady=(0, 10))
-        self.drop = tk.Label(outer, text="Drop screenshot here\n(or click Browse)", height=5, relief="groove", bg="#f3f6fb", font=("Segoe UI", 11))
+        self.drop = tk.Label(outer, text="Drop screenshot here, click Browse, or click here and press Ctrl+V", height=5, relief="groove", bg="#f3f6fb", font=("Segoe UI", 11))
         self.drop.pack(fill="x"); self.drop.drop_target_register(DND_FILES); self.drop.dnd_bind("<<Drop>>", self.on_drop); self.drop.bind("<Button-1>", lambda _e: self.browse())
+        self.drop.bind("<Control-v>", self.paste_image); self.drop.bind("<Control-V>", self.paste_image)
         ttk.Button(outer, text="Browse…", command=self.browse).pack(anchor="e", pady=6)
         self.status = ttk.Label(outer, text="No screenshot selected.", wraplength=700); self.status.pack(anchor="w")
         ttk.Label(outer, text="Manual headline (optional; replaces OCR detection)").pack(anchor="w", pady=(12, 0))
         manual_entry = ttk.Entry(outer, textvariable=self.manual_headline); manual_entry.pack(fill="x")
-        ttk.Label(outer, text="Phrases to highlight (optional; comma-separated; overrides full headline)").pack(anchor="w", pady=(7, 0))
-        phrase_entry = ttk.Entry(outer, textvariable=self.phrases); phrase_entry.pack(fill="x")
+        phrase_frame = ttk.LabelFrame(outer, text="Phrase highlights (optional; each phrase can have its own color)", padding=7)
+        phrase_frame.pack(fill="x", pady=(8, 0))
+        for index, (phrase, phrase_color) in enumerate(self.phrase_rows):
+            column = (index // 5) * 3; row = index % 5
+            ttk.Label(phrase_frame, text=f"{index + 1}.").grid(row=row, column=column, sticky="w", padx=(0, 3), pady=2)
+            ttk.Entry(phrase_frame, textvariable=phrase, width=25).grid(row=row, column=column + 1, sticky="ew", pady=2)
+            button = tk.Button(phrase_frame, text="Color", bg=phrase_color.get(), activebackground=phrase_color.get(), command=lambda i=index: self.choose_phrase_color(i))
+            button.grid(row=row, column=column + 2, padx=(4, 10), pady=2)
+            self.phrase_color_buttons.append(button)
+        phrase_frame.columnconfigure(1, weight=1); phrase_frame.columnconfigure(4, weight=1)
         grid = ttk.Frame(outer); grid.pack(fill="x", pady=12); grid.columnconfigure(1, weight=1); grid.columnconfigure(3, weight=1)
         fields = [("Line highlight time (seconds)", self.line_time), ("Gap between lines (seconds)", self.gap), ("Total video length (seconds)", self.duration)]
         for row, (label, variable) in enumerate(fields):
@@ -312,6 +363,25 @@ class App(TkinterDnD.Tk):
         ttk.Button(buttons, text="Exit", command=self.destroy).pack(side="right")
 
     def on_drop(self, event): self.open_image(clean_drop_path(event.data))
+    def paste_image(self, _event=None):
+        try:
+            pasted = ImageGrab.grabclipboard()
+            if isinstance(pasted, list):
+                if pasted:
+                    self.open_image(pasted[0])
+                    return "break"
+                raise ValueError("The clipboard does not contain an image.")
+            if not isinstance(pasted, Image.Image):
+                raise ValueError("Copy a screenshot to the clipboard first.")
+            temporary = Path(tempfile.gettempdir()) / "HeadlineHighlighter"
+            temporary.mkdir(parents=True, exist_ok=True)
+            image_path = temporary / f"pasted_{datetime.now():%Y%m%d_%H%M%S_%f}.png"
+            pasted.save(image_path, "PNG")
+            self.open_image(str(image_path))
+            return "break"
+        except Exception as exc:
+            messagebox.showerror(APP_NAME, f"Could not paste the screenshot.\n\n{exc}")
+            return "break"
     def browse(self):
         path = filedialog.askopenfilename(filetypes=[("Images", "*.png *.jpg *.jpeg *.bmp *.webp"), ("All files", "*.*")])
         if path: self.open_image(path)
@@ -341,14 +411,21 @@ class App(TkinterDnD.Tk):
                     self.status.configure(text="Manual headline was not found by OCR. Check spelling or use a clearer image.")
                     self.highlight_items = []
                     return False
-        if self.phrases.get().strip():
-            matches, missing = find_phrase_boxes(selected, self.phrases.get())
+        phrase_entries = [(phrase.get().strip(), color.get()) for phrase, color in self.phrase_rows if phrase.get().strip()]
+        if phrase_entries:
+            matched, missing = [], []
+            for phrase, phrase_color in phrase_entries:
+                matches, absent = find_phrase_boxes(selected, phrase)
+                missing.extend(absent)
+                for match in matches:
+                    match["color"] = phrase_color
+                    matched.append(match)
             if missing:
                 self.status.configure(text="Could not match phrase(s): " + ", ".join(missing))
                 self.highlight_items = []
                 return False
-            self.highlight_items = matches
-            self.status.configure(text=f"Highlighting {len(matches)} phrase segment(s) in reading order.")
+            self.highlight_items = sorted(matched, key=lambda item: (item["box"][1], item["box"][0]))
+            self.status.configure(text=f"Highlighting {len(matched)} phrase segment(s) in reading order.")
         else:
             self.highlight_items = list(selected)
             self.status.configure(text="Highlighting the full headline line by line.")
@@ -356,6 +433,11 @@ class App(TkinterDnD.Tk):
     def choose_color(self):
         answer = colorchooser.askcolor(self.color.get(), parent=self)
         if answer[1]: self.color.set(answer[1])
+    def choose_phrase_color(self, index: int):
+        answer = colorchooser.askcolor(self.phrase_rows[index][1].get(), parent=self)
+        if answer[1]:
+            self.phrase_rows[index][1].set(answer[1])
+            self.phrase_color_buttons[index].configure(bg=answer[1], activebackground=answer[1])
     def choose_folder(self):
         answer = filedialog.askdirectory(initialdir=self.folder.get())
         if answer: self.folder.set(answer)
@@ -363,11 +445,12 @@ class App(TkinterDnD.Tk):
         if not self.image_path or not self.apply_selection(): return messagebox.showwarning(APP_NAME, "Choose a screenshot and a detectable headline or phrase first.")
         try:
             line_time, gap, duration = map(float, (self.line_time.get(), self.gap.get(), self.duration.get()))
-            if min(line_time, duration) <= 0 or gap < 0 or not re.fullmatch(r"#[0-9a-fA-F]{6}", self.color.get()): raise ValueError
+            phrase_colors = [color.get() for phrase, color in self.phrase_rows if phrase.get().strip()]
+            if (min(line_time, duration) <= 0 or gap < 0 or
+                    not re.fullmatch(r"#[0-9a-fA-F]{6}", self.color.get()) or
+                    any(not re.fullmatch(r"#[0-9a-fA-F]{6}", value) for value in phrase_colors)): raise ValueError
         except ValueError: return messagebox.showwarning(APP_NAME, "Use positive times, a non-negative gap, and a #RRGGBB color.")
-        name = self.filename.get().strip() or "headline_highlight.mp4"
-        if not name.lower().endswith(".mp4"): name += ".mp4"
-        destination = str(Path(self.folder.get()).expanduser() / name)
+        destination = timestamped_destination(self.folder.get(), self.filename.get())
         try: Path(destination).parent.mkdir(parents=True, exist_ok=True)
         except OSError as exc: return messagebox.showerror(APP_NAME, f"Cannot create output folder.\n{exc}")
         self.save_settings(); self.generate_button.configure(state="disabled"); self.progress["value"] = 0
