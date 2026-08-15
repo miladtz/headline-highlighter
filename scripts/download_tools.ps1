@@ -15,14 +15,15 @@ $tesseractInstaller = Join-Path $env:TEMP 'tesseract-installer.exe'
 Invoke-WebRequest 'https://github.com/UB-Mannheim/tesseract/releases/download/v5.4.0.20240606/tesseract-ocr-w64-setup-5.4.0.20240606.exe' -OutFile $tesseractInstaller
 
 $tesseractDir = Join-Path $vendor 'tesseract'
-& $tesseractInstaller /S "/D=$tesseractDir"
+Start-Process -FilePath $tesseractInstaller -ArgumentList @('/S', "/D=$tesseractDir") -Wait
 
-if ($LASTEXITCODE -ne 0) {
-    throw "Tesseract installer failed with exit code $LASTEXITCODE."
+# The NSIS installer can finish its parent process before copied files appear.
+$exePath = Join-Path $tesseractDir 'tesseract.exe'
+for ($attempt = 1; $attempt -le 30 -and -not (Test-Path $exePath); $attempt++) {
+    Start-Sleep -Seconds 2
 }
 
-Start-Sleep -Seconds 3
-
-if (-not (Test-Path (Join-Path $tesseractDir 'tesseract.exe'))) {
-    throw 'Tesseract installer completed but tesseract.exe was not found.'
+if (-not (Test-Path $exePath)) {
+    Get-ChildItem -Recurse -Force $vendor | Select-Object FullName
+    throw 'Tesseract installation finished, but tesseract.exe was not found.'
 }
