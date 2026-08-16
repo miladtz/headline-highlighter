@@ -5,7 +5,7 @@ from unittest.mock import patch
 
 from PIL import Image
 
-from headline_highlighter import box_is_dark, clean_drop_path, detect_headline, find_manual_headline, find_phrase_boxes, headline_quality, normalise, source_copy_destination, timestamped_destination, zoom_frame
+from headline_highlighter import box_is_dark, clean_drop_path, detect_headline, find_manual_headline, find_phrase_boxes, headline_quality, normalise, remove_header_navigation, source_copy_destination, timestamped_destination, zoom_frame
 
 
 class HeadlineSelectionTests(unittest.TestCase):
@@ -62,6 +62,11 @@ class HeadlineSelectionTests(unittest.TestCase):
         body = {"text": "Additional article details appear below the headline", "box": (20, 180, 650, 205), "height": 25}
         self.assertEqual(detect_headline([title, body], 700), [title])
 
+    def test_header_separated_by_a_hero_gap_is_removed_before_detection(self):
+        navigation = {"text": "POLITICS U.S. NEWS WORLD LOCAL SPORTS", "box": (0, 40, 800, 80), "height": 40}
+        title = {"text": "Woman arrested and facing felony charges", "box": (200, 250, 1100, 310), "height": 60}
+        self.assertEqual(remove_header_navigation([navigation, title], 700), [title])
+
     def test_headline_quality_prefers_complete_multiline_title(self):
         complete = [
             {"text": "Woman arrested and facing felony charges in", "box": (0, 10, 600, 55), "height": 45},
@@ -94,6 +99,14 @@ class HeadlineSelectionTests(unittest.TestCase):
         matches, missing = find_phrase_boxes([line], "fire")
         self.assertEqual(missing, [])
         self.assertEqual(matches[0]["box"], (40, 0, 85, 30))
+
+    def test_phrase_with_commas_matches_normalised_ocr_words(self):
+        line = {"text": "firm axes 2,800 jobs", "box": (0, 0, 250, 30), "height": 30,
+                "words": [{"text": "firm", "box": (0, 0, 40, 30)}, {"text": "axes", "box": (45, 0, 90, 30)},
+                          {"text": "2,800", "box": (95, 0, 155, 30)}, {"text": "jobs", "box": (160, 0, 210, 30)}]}
+        matches, missing = find_phrase_boxes([line], "axes 2,800 jobs", split_phrases=False)
+        self.assertEqual(missing, [])
+        self.assertEqual(matches[0]["box"], (45, 0, 210, 30))
 
     def test_background_classifier_handles_light_and_dark_pages(self):
         self.assertTrue(box_is_dark(Image.new("RGBA", (20, 20), "#10233d"), (0, 0, 20, 20)))
