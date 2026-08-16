@@ -36,7 +36,12 @@ def bundled_path(name: str) -> str:
 
 def configure_tools() -> None:
     root = Path(getattr(sys, "_MEIPASS", Path(__file__).parent))
-    exe = root / "tesseract" / "tesseract.exe"
+    executable = "tesseract.exe" if os.name == "nt" else "tesseract"
+    exe = root / "tesseract" / executable
+    # The ARM64 macOS workflow keeps its source-build runtime in vendor, while
+    # the packaged app receives the same files under the PyInstaller root.
+    if not exe.exists() and sys.platform == "darwin":
+        exe = root / "vendor" / "macos" / "tesseract" / executable
     if exe.exists():
         pytesseract.pytesseract.tesseract_cmd = str(exe)
         os.environ["TESSDATA_PREFIX"] = str(exe.parent / "tessdata")
