@@ -446,6 +446,22 @@ def zoom_scale(mode: str, progress: float) -> float:
     return 1 + amount * (1 - progress if mode == "out" else progress)
 
 
+def crop_to_16_9(image: Image.Image) -> Image.Image:
+    """Center-crop an image to 16:9 without resizing its retained content."""
+    width, height = image.size
+    target = 16 / 9
+    current = width / height
+    if abs(current - target) < .001:
+        return image.copy()
+    if current > target:
+        cropped_width = round(height * target)
+        left = (width - cropped_width) // 2
+        return image.crop((left, 0, left + cropped_width, height))
+    cropped_height = round(width / target)
+    top = (height - cropped_height) // 2
+    return image.crop((0, top, width, top + cropped_height))
+
+
 def generate_video(image_path: str, lines: list[dict], title_time: float, gap: float, duration: float,
                    color: str, destination: str, progress, marker_style: str = "filled", zoom_mode: str = "in") -> None:
     image = Image.open(image_path).convert("RGBA")
@@ -508,14 +524,15 @@ class App(TkinterDnD.Tk):
     def __init__(self):
         super().__init__()
         configure_tools()
-        self.title(APP_NAME); self.geometry("980x830"); self.minsize(860, 760)
-        self.image_path = ""; self.image_height = 0; self.all_lines: list[dict] = []; self.ocr_variants: list[list[dict]] = []; self.headline_variants: list[list[dict]] = []; self.headline_lines: list[dict] = []; self.detected_headline = ""; self.highlight_items: list[dict] = []
+        self.title(APP_NAME); self.geometry("980x900"); self.minsize(860, 800)
+        self.image_path = ""; self.source_image_path = ""; self.image_height = 0; self.all_lines: list[dict] = []; self.ocr_variants: list[list[dict]] = []; self.headline_variants: list[list[dict]] = []; self.headline_lines: list[dict] = []; self.detected_headline = ""; self.highlight_items: list[dict] = []
         self.values = self.load_settings()
         self.title_time = tk.StringVar(value=str(self.values.get("title_time", 3.0)))
         self.gap = tk.StringVar(value=str(self.values.get("gap", 0.18)))
         self.duration = tk.StringVar(value=str(self.values.get("duration", 5.0)))
         self.color = tk.StringVar(value=self.values.get("color", "#FFF200"))
         self.zoom_mode = tk.StringVar(value=self.values.get("zoom_mode", "in"))
+        self.crop_16_9 = tk.BooleanVar(value=bool(self.values.get("crop_16_9", False)))
         saved_style = self.values.get("marker_style")
         if saved_style not in ("filled", "outline", "brush", "grunge"):
             saved_style = "outline" if self.values.get("outline_style", self.values.get("tight_shape", False)) else "filled"
@@ -537,21 +554,24 @@ class App(TkinterDnD.Tk):
 
     def save_settings(self):
         SETTINGS_PATH.parent.mkdir(parents=True, exist_ok=True)
-        SETTINGS_PATH.write_text(json.dumps({"title_time": self.title_time.get(), "gap": self.gap.get(), "duration": self.duration.get(), "color": self.color.get(), "marker_style": self.marker_style.get(), "zoom_mode": self.zoom_mode.get(), "default_box_style": self.default_box_style.get()}), encoding="utf-8")
+        SETTINGS_PATH.write_text(json.dumps({"title_time": self.title_time.get(), "gap": self.gap.get(), "duration": self.duration.get(), "color": self.color.get(), "marker_style": self.marker_style.get(), "zoom_mode": self.zoom_mode.get(), "default_box_style": self.default_box_style.get(), "crop_16_9": self.crop_16_9.get()}), encoding="utf-8")
 
     def build_ui(self):
         outer = ttk.Frame(self, padding=16); outer.pack(fill="both", expand=True)
         ttk.Label(outer, text=APP_NAME, font=("Segoe UI", 18, "bold")).pack(anchor="w")
         ttk.Label(outer, text="Drop a screenshot below or choose one. The headline is found automatically.").pack(anchor="w", pady=(0, 10))
         image_frame = ttk.Frame(outer); image_frame.pack(fill="x")
+        image_frame.columnconfigure(0, weight=3); image_frame.columnconfigure(1, weight=7)
+        image_frame.rowconfigure(0, weight=1)
         self.drop = tk.Label(image_frame, text="Drop screenshot here, click Browse, or click here and press Ctrl+V", height=5, relief="groove", bg="#f3f6fb", font=("Segoe UI", 11))
-        self.drop.pack(side="left", fill="x", expand=True); self.drop.drop_target_register(DND_FILES); self.drop.dnd_bind("<<Drop>>", self.on_drop); self.drop.bind("<Button-1>", self.focus_paste_area)
+        self.drop.grid(row=0, column=0, sticky="nsew"); self.drop.drop_target_register(DND_FILES); self.drop.dnd_bind("<<Drop>>", self.on_drop); self.drop.bind("<Button-1>", self.focus_paste_area)
         self.drop.bind("<Control-v>", self.paste_image); self.drop.bind("<Control-V>", self.paste_image)
-        self.preview = tk.Label(image_frame, text="No image", width=16, height=5, relief="groove", bg="#f3f6fb", fg="#666")
-        self.preview.pack(side="left", padx=(8, 0))
+        self.preview = tk.Label(image_frame, text="No image", height=8, relief="groove", bg="#f3f6fb", fg="#666")
+        self.preview.grid(row=0, column=1, sticky="nsew", padx=(8, 0))
         image_buttons = ttk.Frame(outer); image_buttons.pack(fill="x", pady=6)
         ttk.Button(image_buttons, text="Browse…", command=self.browse).pack(side="right")
         ttk.Button(image_buttons, text="Remove", command=self.remove_image).pack(side="right", padx=(0, 6))
+        ttk.Checkbutton(image_buttons, text="Crop to 16:9 (center)", variable=self.crop_16_9, command=self.on_crop_mode_changed).pack(side="left")
         self.status = ttk.Label(outer, text="No screenshot selected.", wraplength=700); self.status.pack(anchor="w")
         ttk.Label(outer, text="Manual headline (optional; replaces OCR detection)").pack(anchor="w", pady=(12, 0))
         manual_entry = ttk.Entry(outer, textvariable=self.manual_headline); manual_entry.pack(fill="x")
@@ -612,12 +632,12 @@ class App(TkinterDnD.Tk):
 
     def show_preview(self, image: Image.Image):
         preview = image.copy()
-        preview.thumbnail((145, 100))
+        preview.thumbnail((620, 170))
         self.preview_image = ImageTk.PhotoImage(preview)
         self.preview.configure(image=self.preview_image, text="")
 
     def clear_image(self, clear_manual: bool = True):
-        self.image_path = ""; self.image_height = 0; self.all_lines = []; self.ocr_variants = []
+        self.image_path = ""; self.source_image_path = ""; self.image_height = 0; self.all_lines = []; self.ocr_variants = []
         self.headline_variants = []; self.headline_lines = []; self.detected_headline = ""; self.highlight_items = []
         self.preview_image = None
         self.preview.configure(image="", text="No image")
@@ -635,6 +655,10 @@ class App(TkinterDnD.Tk):
             phrase.set("")
             phrase_color.set(DEFAULT_BOX_COLOR)
             phrase_style.set(self.default_box_style.get())
+
+    def on_crop_mode_changed(self):
+        if self.source_image_path:
+            self.open_image(self.source_image_path)
 
     def focus_paste_area(self, _event=None):
         self.drop.focus_set()
@@ -665,7 +689,17 @@ class App(TkinterDnD.Tk):
     def open_image(self, path):
         try:
             image = Image.open(path); image.verify(); image = Image.open(path).convert("RGB")
-            self.image_path = path; self.show_preview(image); self.status.configure(text="Reading headline with OCR…") ; self.update_idletasks()
+            self.source_image_path = path
+            if self.crop_16_9.get():
+                image = crop_to_16_9(image)
+                prepared = Path(tempfile.gettempdir()) / "HeadlineHighlighter"
+                prepared.mkdir(parents=True, exist_ok=True)
+                render_path = prepared / f"crop16x9_{datetime.now():%Y%m%d_%H%M%S_%f}.png"
+                image.save(render_path, "PNG")
+                self.image_path = str(render_path)
+            else:
+                self.image_path = path
+            self.show_preview(image); self.status.configure(text="Reading headline with OCR…") ; self.update_idletasks()
             # Sparse-text and document OCR modes each perform better on
             # different screenshots. Choose the strongest headline result.
             self.image_height = image.height
