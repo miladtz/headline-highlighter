@@ -70,6 +70,19 @@ def ocr_lines(image: Image.Image, psm: int = 11) -> list[dict]:
     return sorted(result, key=lambda item: (item["box"][1], item["box"][0]))
 
 
+def remove_header_navigation(lines: list[dict], image_height: int) -> list[dict]:
+    """Drop a header separated from the article by a large hero-area gap."""
+    if len(lines) < 2:
+        return lines
+    for index, (previous, following) in enumerate(zip(lines, lines[1:])):
+        gap = following["box"][1] - previous["box"][3]
+        header_ends_early = previous["box"][3] < image_height * .28
+        separated = gap > max(previous["height"], following["height"]) * 2.0
+        if header_ends_early and separated:
+            return lines[index + 1:]
+    return lines
+
+
 def detect_headline(lines: list[dict], image_height: int) -> list[dict]:
     """Choose the most title-like line and adjoining similarly sized lines."""
     candidates = [line for line in lines if line["box"][1] < image_height * .65]
@@ -178,9 +191,9 @@ def source_copy_destination(source_path: str, video_destination: str) -> str:
     return str(Path(video_destination).with_suffix(suffix))
 
 
-def find_phrase_boxes(lines: list[dict], phrase_input: str) -> tuple[list[dict], list[str]]:
-    """Find comma-separated phrases from OCR word boxes, returned in page order."""
-    requested = [piece.strip() for piece in phrase_input.split(",") if piece.strip()]
+def find_phrase_boxes(lines: list[dict], phrase_input: str, split_phrases: bool = True) -> tuple[list[dict], list[str]]:
+    """Find phrase boxes; separate UI fields treat commas as literal text."""
+    requested = [piece.strip() for piece in phrase_input.split(",") if piece.strip()] if split_phrases else [phrase_input.strip()]
     words = [(line_index, word) for line_index, line in enumerate(lines) for word in line.get("words", [])]
     found, missing = [], []
     for phrase in requested:
@@ -337,7 +350,7 @@ class App(TkinterDnD.Tk):
         super().__init__()
         configure_tools()
         self.title(APP_NAME); self.geometry("820x760"); self.minsize(720, 680)
-        self.image_path = ""; self.all_lines: list[dict] = []; self.ocr_variants: list[list[dict]] = []; self.headline_variants: list[list[dict]] = []; self.headline_lines: list[dict] = []; self.detected_headline = ""; self.highlight_items: list[dict] = []
+        self.image_path = ""; self.image_height = 0; self.all_lines: list[dict] = []; self.ocr_variants: list[list[dict]] = []; self.headline_variants: list[list[dict]] = []; self.headline_lines: list[dict] = []; self.detected_headline = ""; self.highlight_items: list[dict] = []
         self.values = self.load_settings()
         self.line_time = tk.StringVar(value=str(self.values.get("line_time", 0.8)))
         self.gap = tk.StringVar(value=str(self.values.get("gap", 0.18)))
@@ -428,7 +441,8 @@ class App(TkinterDnD.Tk):
             self.image_path = path; self.status.configure(text="Reading headline with OCR…") ; self.update_idletasks()
             # Sparse-text and document OCR modes each perform better on
             # different screenshots. Choose the strongest headline result.
-            self.ocr_variants = [ocr_lines(image, psm) for psm in (11, 6, 3)]
+            self.image_height = image.height
+            self.ocr_variants = [remove_header_navigation(ocr_lines(image, psm), image.height) for psm in (11, 6, 3)]
             self.headline_variants = [detect_headline(lines, image.height) for lines in self.ocr_variants]
             choices = list(zip(self.headline_variants, self.ocr_variants))
             self.headline_lines, self.all_lines = max(choices, key=lambda choice: headline_quality(choice[0]))
@@ -454,18 +468,21 @@ class App(TkinterDnD.Tk):
         phrase_entries = [(phrase.get().strip(), color.get()) for phrase, color in self.phrase_rows if phrase.get().strip()]
         if phrase_entries:
             matched, missing = [], []
+            title_center = sum((line["box"][1] + line["box"][3]) / 2 for line in selected) / max(1, len(selected))
             for phrase, phrase_color in phrase_entries:
-                # Automatic OCR may merge a small section label with the main
-                # title. Pick the OCR pass with the tightest phrase box.
-                if manual_override:
-                    phrase_options = [find_phrase_boxes(selected, phrase)]
-                else:
-                    phrase_options = [find_phrase_boxes(lines, phrase) for lines in self.headline_variants]
+                # Search every filtered OCR line, not just the initially
+                # selected lines. This finds wrapped phrases (for example,
+                # "axes 2,800 jobs") even if detection missed their line.
+                phrase_options = [find_phrase_boxes(lines, phrase, split_phrases=False) for lines in self.ocr_variants]
                 found = [option[0] for option in phrase_options if not option[1]]
                 if not found:
                     missing.append(phrase)
                     continue
-                matches = min(found, key=lambda result: sum((item["box"][2] - item["box"][0]) * (item["box"][3] - item["box"][1]) for item in result))
+                def match_rank(result):
+                    center = sum((item["box"][1] + item["box"][3]) / 2 for item in result) / len(result)
+                    area = sum((item["box"][2] - item["box"][0]) * (item["box"][3] - item["box"][1]) for item in result)
+                    return abs(center - title_center), area
+                matches = min(found, key=match_rank)
                 for match in matches:
                     match["color"] = phrase_color
                     matched.append(match)
