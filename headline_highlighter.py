@@ -25,6 +25,8 @@ from tkinterdnd2 import DND_FILES, TkinterDnD
 
 APP_NAME = "Headline Highlighter"
 SETTINGS_PATH = Path(os.getenv("APPDATA", Path.home())) / "HeadlineHighlighter" / "settings.json"
+STYLE_VALUES = ("Filled", "Outline", "Brush", "Grunge")
+DEFAULT_BOX_COLOR = "#FFF200"
 
 
 def bundled_path(name: str) -> str:
@@ -437,8 +439,15 @@ def zoom_frame(image: Image.Image, center: tuple[float, float], scale: float) ->
     )
 
 
+def zoom_scale(mode: str, progress: float) -> float:
+    """Return a smooth zoom-in or reverse zoom-out scale for one video frame."""
+    amount = .08
+    progress = min(1.0, max(0.0, progress))
+    return 1 + amount * (1 - progress if mode == "out" else progress)
+
+
 def generate_video(image_path: str, lines: list[dict], title_time: float, gap: float, duration: float,
-                   color: str, destination: str, progress, marker_style: str = "filled") -> None:
+                   color: str, destination: str, progress, marker_style: str = "filled", zoom_mode: str = "in") -> None:
     image = Image.open(image_path).convert("RGBA")
     fps = 30
     frames = max(1, round(duration * fps))
@@ -465,18 +474,19 @@ def generate_video(image_path: str, lines: list[dict], title_time: float, gap: f
                 f = min(1.0, max(0.0, (t-cursor) / line_duration))
                 if f:
                     # The outline closely follows the exact words, while the
+                    item_style = line.get("style", marker_style)
                     # filled, brush, and grunge styles use the natural headline band.
-                    render_box = line["box"] if marker_style == "outline" else line.get("line_box", line["box"])
+                    render_box = line["box"] if item_style == "outline" else line.get("line_box", line["box"])
                     dark_background = box_is_dark(image, render_box)
-                    opacity = 65 if dark_background and marker_style == "outline" else (110 if dark_background else 118)
+                    opacity = 65 if dark_background and item_style == "outline" else (110 if dark_background else 118)
                     line_color = line.get("color", color)
                     composed.alpha_composite(marker_layer(image.size, render_box, line_color, f, n, opacity,
-                                                          outline=marker_style == "outline", brush=marker_style == "brush",
-                                                          grunge=marker_style == "grunge"))
+                                                          outline=item_style == "outline", brush=item_style == "brush",
+                                                          grunge=item_style == "grunge"))
                     visible_box = (render_box[0], render_box[1], round(render_box[0] + (render_box[2] - render_box[0]) * f), render_box[3])
                     preserve_text_appearance(composed, image, visible_box, line_color, dark_background)
                 cursor += line_duration + (gap if n < len(lines)-1 else 0)
-            composed = zoom_frame(composed, focus, 1 + .08 * frame / max(1, frames - 1))
+            composed = zoom_frame(composed, focus, zoom_scale(zoom_mode, frame / max(1, frames - 1)))
             try:
                 process.stdin.write(composed.tobytes())
             except BrokenPipeError:
@@ -498,21 +508,27 @@ class App(TkinterDnD.Tk):
     def __init__(self):
         super().__init__()
         configure_tools()
-        self.title(APP_NAME); self.geometry("820x760"); self.minsize(720, 680)
+        self.title(APP_NAME); self.geometry("980x830"); self.minsize(860, 760)
         self.image_path = ""; self.image_height = 0; self.all_lines: list[dict] = []; self.ocr_variants: list[list[dict]] = []; self.headline_variants: list[list[dict]] = []; self.headline_lines: list[dict] = []; self.detected_headline = ""; self.highlight_items: list[dict] = []
         self.values = self.load_settings()
         self.title_time = tk.StringVar(value=str(self.values.get("title_time", 3.0)))
         self.gap = tk.StringVar(value=str(self.values.get("gap", 0.18)))
         self.duration = tk.StringVar(value=str(self.values.get("duration", 5.0)))
         self.color = tk.StringVar(value=self.values.get("color", "#FFF200"))
+        self.zoom_mode = tk.StringVar(value=self.values.get("zoom_mode", "in"))
         saved_style = self.values.get("marker_style")
         if saved_style not in ("filled", "outline", "brush", "grunge"):
             saved_style = "outline" if self.values.get("outline_style", self.values.get("tight_shape", False)) else "filled"
         self.marker_style = tk.StringVar(value=saved_style)
+        self.default_box_style = tk.StringVar(value=self.values.get("default_box_style", "Filled"))
+        if self.default_box_style.get() not in STYLE_VALUES:
+            self.default_box_style.set("Filled")
         self.manual_headline = tk.StringVar(); self.filename = tk.StringVar(value="headline_highlight.mp4")
         self.folder = tk.StringVar(value=str(Path.home() / "Videos"))
-        self.phrase_rows = [(tk.StringVar(), tk.StringVar(value="#FFF200")) for _ in range(10)]
+        self.phrase_rows = [(tk.StringVar(), tk.StringVar(value=DEFAULT_BOX_COLOR), tk.StringVar(value=self.default_box_style.get())) for _ in range(10)]
         self.phrase_color_buttons: list[tk.Button] = []
+        self.preview_image = None
+        self.default_box_style.trace_add("write", self.apply_default_box_style)
         self.build_ui()
 
     def load_settings(self):
@@ -521,29 +537,40 @@ class App(TkinterDnD.Tk):
 
     def save_settings(self):
         SETTINGS_PATH.parent.mkdir(parents=True, exist_ok=True)
-        SETTINGS_PATH.write_text(json.dumps({"title_time": self.title_time.get(), "gap": self.gap.get(), "duration": self.duration.get(), "color": self.color.get(), "marker_style": self.marker_style.get()}), encoding="utf-8")
+        SETTINGS_PATH.write_text(json.dumps({"title_time": self.title_time.get(), "gap": self.gap.get(), "duration": self.duration.get(), "color": self.color.get(), "marker_style": self.marker_style.get(), "zoom_mode": self.zoom_mode.get(), "default_box_style": self.default_box_style.get()}), encoding="utf-8")
 
     def build_ui(self):
         outer = ttk.Frame(self, padding=16); outer.pack(fill="both", expand=True)
         ttk.Label(outer, text=APP_NAME, font=("Segoe UI", 18, "bold")).pack(anchor="w")
         ttk.Label(outer, text="Drop a screenshot below or choose one. The headline is found automatically.").pack(anchor="w", pady=(0, 10))
-        self.drop = tk.Label(outer, text="Drop screenshot here, click Browse, or click here and press Ctrl+V", height=5, relief="groove", bg="#f3f6fb", font=("Segoe UI", 11))
-        self.drop.pack(fill="x"); self.drop.drop_target_register(DND_FILES); self.drop.dnd_bind("<<Drop>>", self.on_drop); self.drop.bind("<Button-1>", self.focus_paste_area)
+        image_frame = ttk.Frame(outer); image_frame.pack(fill="x")
+        self.drop = tk.Label(image_frame, text="Drop screenshot here, click Browse, or click here and press Ctrl+V", height=5, relief="groove", bg="#f3f6fb", font=("Segoe UI", 11))
+        self.drop.pack(side="left", fill="x", expand=True); self.drop.drop_target_register(DND_FILES); self.drop.dnd_bind("<<Drop>>", self.on_drop); self.drop.bind("<Button-1>", self.focus_paste_area)
         self.drop.bind("<Control-v>", self.paste_image); self.drop.bind("<Control-V>", self.paste_image)
-        ttk.Button(outer, text="Browse…", command=self.browse).pack(anchor="e", pady=6)
+        self.preview = tk.Label(image_frame, text="No image", width=16, height=5, relief="groove", bg="#f3f6fb", fg="#666")
+        self.preview.pack(side="left", padx=(8, 0))
+        image_buttons = ttk.Frame(outer); image_buttons.pack(fill="x", pady=6)
+        ttk.Button(image_buttons, text="Browse…", command=self.browse).pack(side="right")
+        ttk.Button(image_buttons, text="Remove", command=self.remove_image).pack(side="right", padx=(0, 6))
         self.status = ttk.Label(outer, text="No screenshot selected.", wraplength=700); self.status.pack(anchor="w")
         ttk.Label(outer, text="Manual headline (optional; replaces OCR detection)").pack(anchor="w", pady=(12, 0))
         manual_entry = ttk.Entry(outer, textvariable=self.manual_headline); manual_entry.pack(fill="x")
-        phrase_frame = ttk.LabelFrame(outer, text="Phrase highlights (optional; each phrase can have its own color)", padding=7)
+        phrase_frame = ttk.LabelFrame(outer, text="Phrase highlights (optional; each phrase can have its own color and style)", padding=7)
         phrase_frame.pack(fill="x", pady=(8, 0))
-        for index, (phrase, phrase_color) in enumerate(self.phrase_rows):
-            column = (index // 5) * 3; row = index % 5
+        defaults = ttk.Frame(phrase_frame); defaults.grid(row=0, column=0, columnspan=10, sticky="w", pady=(0, 4))
+        ttk.Label(defaults, text="Default style for all boxes:").pack(side="left")
+        ttk.Combobox(defaults, textvariable=self.default_box_style, values=STYLE_VALUES, width=10, state="readonly").pack(side="left", padx=(6, 0))
+        for index, (phrase, phrase_color, phrase_style) in enumerate(self.phrase_rows):
+            column = (index // 5) * 5; row = index % 5 + 1
             ttk.Label(phrase_frame, text=f"{index + 1}.").grid(row=row, column=column, sticky="w", padx=(0, 3), pady=2)
-            ttk.Entry(phrase_frame, textvariable=phrase, width=25).grid(row=row, column=column + 1, sticky="ew", pady=2)
+            ttk.Entry(phrase_frame, textvariable=phrase, width=15).grid(row=row, column=column + 1, sticky="ew", pady=2)
+            ttk.Entry(phrase_frame, textvariable=phrase_color, width=9).grid(row=row, column=column + 2, padx=(4, 0), pady=2)
             button = tk.Button(phrase_frame, text="Color", bg=phrase_color.get(), activebackground=phrase_color.get(), command=lambda i=index: self.choose_phrase_color(i))
-            button.grid(row=row, column=column + 2, padx=(4, 10), pady=2)
+            button.grid(row=row, column=column + 3, padx=(4, 4), pady=2)
             self.phrase_color_buttons.append(button)
-        phrase_frame.columnconfigure(1, weight=1); phrase_frame.columnconfigure(4, weight=1)
+            ttk.Combobox(phrase_frame, textvariable=phrase_style, values=STYLE_VALUES, width=8, state="readonly").grid(row=row, column=column + 4, padx=(0, 8), pady=2)
+            phrase_color.trace_add("write", lambda *_args, i=index: self.update_phrase_color_button(i))
+        phrase_frame.columnconfigure(1, weight=1); phrase_frame.columnconfigure(6, weight=1)
         grid = ttk.Frame(outer); grid.pack(fill="x", pady=12); grid.columnconfigure(1, weight=1); grid.columnconfigure(3, weight=1)
         fields = [("Title highlighting time (seconds)", self.title_time), ("Gap between lines (seconds)", self.gap), ("Total video length (seconds)", self.duration)]
         for row, (label, variable) in enumerate(fields):
@@ -558,16 +585,57 @@ class App(TkinterDnD.Tk):
         ttk.Radiobutton(style_frame, text="Outline", variable=self.marker_style, value="outline").pack(side="left", padx=(8, 0))
         ttk.Radiobutton(style_frame, text="Brush", variable=self.marker_style, value="brush").pack(side="left", padx=(8, 0))
         ttk.Radiobutton(style_frame, text="Grunge", variable=self.marker_style, value="grunge").pack(side="left", padx=(8, 0))
-        ttk.Label(grid, text="Output filename").grid(row=3, column=0, sticky="w", pady=3)
-        ttk.Entry(grid, textvariable=self.filename).grid(row=3, column=1, columnspan=3, sticky="ew", pady=3)
-        ttk.Label(grid, text="Output folder").grid(row=4, column=0, sticky="w", pady=3)
-        ttk.Entry(grid, textvariable=self.folder).grid(row=4, column=1, columnspan=2, sticky="ew", pady=3)
-        ttk.Button(grid, text="Browse…", command=self.choose_folder).grid(row=4, column=3, sticky="e")
+        zoom_options = ttk.Frame(grid); zoom_options.grid(row=3, column=2, columnspan=2, sticky="w", padx=(25, 0), pady=3)
+        ttk.Label(zoom_options, text="Zoom direction").pack(side="left", padx=(0, 8))
+        ttk.Radiobutton(zoom_options, text="Zoom in", variable=self.zoom_mode, value="in").pack(side="left")
+        ttk.Radiobutton(zoom_options, text="Zoom out", variable=self.zoom_mode, value="out").pack(side="left", padx=(8, 0))
+        ttk.Label(grid, text="Output filename").grid(row=4, column=0, sticky="w", pady=3)
+        ttk.Entry(grid, textvariable=self.filename).grid(row=4, column=1, columnspan=3, sticky="ew", pady=3)
+        ttk.Label(grid, text="Output folder").grid(row=5, column=0, sticky="w", pady=3)
+        ttk.Entry(grid, textvariable=self.folder).grid(row=5, column=1, columnspan=2, sticky="ew", pady=3)
+        ttk.Button(grid, text="Browse…", command=self.choose_folder).grid(row=5, column=3, sticky="e")
         self.progress = ttk.Progressbar(outer, maximum=100); self.progress.pack(fill="x", pady=(4, 8))
         buttons = ttk.Frame(outer); buttons.pack(fill="x"); self.generate_button = ttk.Button(buttons, text="Generate Video", command=self.start_generate); self.generate_button.pack(side="left")
+        ttk.Button(buttons, text="Clear", command=self.clear_all).pack(side="left", padx=(8, 0))
         ttk.Button(buttons, text="Exit", command=self.destroy).pack(side="right")
 
     def on_drop(self, event): self.open_image(clean_drop_path(event.data))
+
+    def apply_default_box_style(self, *_args):
+        for _phrase, _color, style in self.phrase_rows:
+            style.set(self.default_box_style.get())
+
+    def update_phrase_color_button(self, index: int):
+        value = self.phrase_rows[index][1].get()
+        if re.fullmatch(r"#[0-9a-fA-F]{6}", value):
+            self.phrase_color_buttons[index].configure(bg=value, activebackground=value)
+
+    def show_preview(self, image: Image.Image):
+        preview = image.copy()
+        preview.thumbnail((145, 100))
+        self.preview_image = ImageTk.PhotoImage(preview)
+        self.preview.configure(image=self.preview_image, text="")
+
+    def clear_image(self, clear_manual: bool = True):
+        self.image_path = ""; self.image_height = 0; self.all_lines = []; self.ocr_variants = []
+        self.headline_variants = []; self.headline_lines = []; self.detected_headline = ""; self.highlight_items = []
+        self.preview_image = None
+        self.preview.configure(image="", text="No image")
+        if clear_manual:
+            self.manual_headline.set("")
+        self.status.configure(text="No screenshot selected.")
+
+    def remove_image(self):
+        if self.image_path:
+            self.clear_image(clear_manual=True)
+
+    def clear_all(self):
+        self.clear_image(clear_manual=True)
+        for phrase, phrase_color, phrase_style in self.phrase_rows:
+            phrase.set("")
+            phrase_color.set(DEFAULT_BOX_COLOR)
+            phrase_style.set(self.default_box_style.get())
+
     def focus_paste_area(self, _event=None):
         self.drop.focus_set()
         self.status.configure(text="Paste area selected. Press Ctrl+V to paste a screenshot, or use Browse to select a file.")
@@ -597,7 +665,7 @@ class App(TkinterDnD.Tk):
     def open_image(self, path):
         try:
             image = Image.open(path); image.verify(); image = Image.open(path).convert("RGB")
-            self.image_path = path; self.status.configure(text="Reading headline with OCR…") ; self.update_idletasks()
+            self.image_path = path; self.show_preview(image); self.status.configure(text="Reading headline with OCR…") ; self.update_idletasks()
             # Sparse-text and document OCR modes each perform better on
             # different screenshots. Choose the strongest headline result.
             self.image_height = image.height
@@ -637,11 +705,12 @@ class App(TkinterDnD.Tk):
                 else:
                     self.status.configure(text="Manual headline was not found by OCR. Check spelling or use a clearer image.")
                     return False
-        phrase_entries = [(phrase.get().strip(), color.get()) for phrase, color in self.phrase_rows if phrase.get().strip()]
+        phrase_entries = [(phrase.get().strip(), color.get(), style.get().lower())
+                          for phrase, color, style in self.phrase_rows if phrase.get().strip()]
         if phrase_entries:
             matched, missing = [], []
             title_center = sum((line["box"][1] + line["box"][3]) / 2 for line in selected) / max(1, len(selected))
-            for phrase, phrase_color in phrase_entries:
+            for phrase, phrase_color, phrase_style in phrase_entries:
                 # Search every filtered OCR line, not just the initially
                 # selected lines. This finds wrapped phrases (for example,
                 # "axes 2,800 jobs") even if detection missed their line.
@@ -657,6 +726,7 @@ class App(TkinterDnD.Tk):
                 matches = min(found, key=match_rank)
                 for match in matches:
                     match["color"] = phrase_color
+                    match["style"] = phrase_style
                     matched.append(match)
             if missing:
                 self.status.configure(text="Could not match phrase(s): " + ", ".join(missing))
@@ -682,7 +752,7 @@ class App(TkinterDnD.Tk):
         if not self.image_path or not self.apply_selection(): return messagebox.showwarning(APP_NAME, "Choose a screenshot and a detectable headline or phrase first.")
         try:
             title_time, gap, duration = map(float, (self.title_time.get(), self.gap.get(), self.duration.get()))
-            phrase_colors = [color.get() for phrase, color in self.phrase_rows if phrase.get().strip()]
+            phrase_colors = [color.get() for phrase, color, _style in self.phrase_rows if phrase.get().strip()]
             if (min(title_time, duration) <= 0 or gap < 0 or
                     not re.fullmatch(r"#[0-9a-fA-F]{6}", self.color.get()) or
                     any(not re.fullmatch(r"#[0-9a-fA-F]{6}", value) for value in phrase_colors)): raise ValueError
@@ -696,7 +766,7 @@ class App(TkinterDnD.Tk):
         self.save_settings(); self.generate_button.configure(state="disabled"); self.progress["value"] = 0
         def task():
             try:
-                generate_video(self.image_path, self.highlight_items, title_time, gap, duration, self.color.get(), destination, lambda p: self.after(0, lambda: self.progress.configure(value=p)), marker_style=self.marker_style.get())
+                generate_video(self.image_path, self.highlight_items, title_time, gap, duration, self.color.get(), destination, lambda p: self.after(0, lambda: self.progress.configure(value=p)), marker_style=self.marker_style.get(), zoom_mode=self.zoom_mode.get())
                 source_destination = source_copy_destination(self.image_path, destination)
                 shutil.copy2(self.image_path, source_destination)
                 self.after(0, lambda: messagebox.showinfo(APP_NAME, f"Video created:\n{destination}\n\nSource image saved:\n{source_destination}"))
