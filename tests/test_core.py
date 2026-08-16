@@ -5,7 +5,7 @@ from unittest.mock import patch
 
 from PIL import Image
 
-from headline_highlighter import box_is_dark, clean_drop_path, detect_headline, find_manual_headline, find_phrase_boxes, headline_quality, normalise, remove_header_navigation, source_copy_destination, timestamped_destination, zoom_frame
+from headline_highlighter import box_is_dark, clean_drop_path, detect_headline, find_manual_headline, find_phrase_boxes, headline_quality, line_highlight_durations, normalise, remove_header_navigation, source_copy_destination, timestamped_destination, zoom_frame
 
 
 class HeadlineSelectionTests(unittest.TestCase):
@@ -43,6 +43,13 @@ class HeadlineSelectionTests(unittest.TestCase):
     def test_source_copy_uses_the_video_stem_and_image_extension(self):
         copied = Path(source_copy_destination("C:/input/news.png", "C:/videos/headline_20260815_143005.mp4"))
         self.assertEqual(copied.name, "headline_20260815_143005.png")
+
+    def test_title_time_is_distributed_by_marker_width(self):
+        lines = [{"box": (0, 0, 10, 10)}, {"box": (0, 0, 8, 10)}, {"box": (0, 0, 3, 10)}]
+        durations = line_highlight_durations(lines, 6)
+        self.assertAlmostEqual(sum(durations), 6)
+        self.assertAlmostEqual(durations[0] / 10, durations[1] / 8)
+        self.assertAlmostEqual(durations[1] / 8, durations[2] / 3)
 
     def test_detector_prefers_large_top_line(self):
         title = {"text": "The Main Headline", "box": (10, 30, 320, 80), "height": 50}
@@ -107,6 +114,32 @@ class HeadlineSelectionTests(unittest.TestCase):
         matches, missing = find_phrase_boxes([line], "axes 2,800 jobs", split_phrases=False)
         self.assertEqual(missing, [])
         self.assertEqual(matches[0]["box"], (45, 0, 210, 30))
+
+    def test_phrase_matches_roman_numeral_ocr_variants(self):
+        line = {"text": "World War Il Memorial", "box": (0, 0, 300, 30), "height": 30,
+                "words": [{"text": "World", "box": (0, 0, 70, 30)}, {"text": "War", "box": (75, 0, 120, 30)},
+                          {"text": "Il", "box": (125, 0, 145, 30)}, {"text": "Memorial", "box": (150, 0, 260, 30)}]}
+        matches, missing = find_phrase_boxes([line], "**World War II", split_phrases=False)
+        self.assertEqual(missing, [])
+        self.assertEqual(matches[0]["box"], (0, 0, 145, 30))
+
+    def test_phrase_has_a_full_line_band_box_and_tight_word_box(self):
+        line = {"text": "facing felony", "box": (20, 10, 250, 60), "height": 50,
+                "words": [{"text": "facing", "box": (40, 22, 110, 45)}, {"text": "felony", "box": (120, 22, 190, 45)}]}
+        matches, missing = find_phrase_boxes([line], "facing felony", split_phrases=False)
+        self.assertEqual(missing, [])
+        self.assertEqual(matches[0]["box"], (40, 22, 190, 45))
+        self.assertEqual(matches[0]["line_box"], (40, 10, 190, 60))
+
+    def test_full_manual_phrase_uses_title_words_not_a_merged_header_line(self):
+        line = {"text": "BBC Peloton boss John Foley to step down", "box": (0, 0, 500, 40), "height": 40,
+                "words": [{"text": "BBC", "box": (0, 0, 55, 40)}, {"text": "Peloton", "box": (120, 0, 210, 40)},
+                          {"text": "boss", "box": (215, 0, 260, 40)}, {"text": "John", "box": (265, 0, 315, 40)},
+                          {"text": "Foley", "box": (320, 0, 380, 40)}, {"text": "to", "box": (385, 0, 410, 40)},
+                          {"text": "step", "box": (415, 0, 465, 40)}, {"text": "down", "box": (470, 0, 520, 40)}]}
+        matches, missing = find_phrase_boxes([line], "Peloton boss John Foley to step down", split_phrases=False)
+        self.assertEqual(missing, [])
+        self.assertEqual(matches[0]["box"], (120, 0, 520, 40))
 
     def test_background_classifier_handles_light_and_dark_pages(self):
         self.assertTrue(box_is_dark(Image.new("RGBA", (20, 20), "#10233d"), (0, 0, 20, 20)))
