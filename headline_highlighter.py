@@ -270,8 +270,8 @@ def find_phrase_boxes(lines: list[dict], phrase_input: str, split_phrases: bool 
 
 
 def marker_layer(size: tuple[int, int], box: tuple[int, int, int, int], color: str, fraction: float, seed: int,
-                 opacity: int, outline: bool = False, brush: bool = False) -> Image.Image:
-    """Create a filled marker band, hand-drawn outline, or dry-brush stroke."""
+                 opacity: int, outline: bool = False, brush: bool = False, grunge: bool = False) -> Image.Image:
+    """Create a filled marker band, outline, dry brush, or distressed banner."""
     x0, y0, x1, y1 = box
     pad_x = max(2, (y1-y0) // 12); pad_y = max(1, (y1-y0) // 16)
     x0 -= pad_x; x1 += pad_x; y0 -= pad_y; y1 += pad_y
@@ -309,21 +309,50 @@ def marker_layer(size: tuple[int, int], box: tuple[int, int, int, int], color: s
         draw.line([top[0], bottom[0]], fill=(*rgb, min(255, opacity + 90)), width=edge_width)
         draw.line([top[-1], bottom[-1]], fill=(*rgb, min(255, opacity + 90)), width=edge_width)
     elif brush:
-        # Layered bristles create a dry-brush look: strong, uneven coverage
-        # through the centre and fine broken strands around the top and bottom.
-        bristles = max(10, height // 3)
+        # Build irregular groups of bristles rather than uniform parallel
+        # lines.  Varying starts, gaps, pigment density, and strand lengths
+        # makes each generated stroke resemble a real brush print.
+        bristles = max(14, height // 2)
         for i in range(bristles):
             y = y0 + height * i / max(1, bristles - 1) + rnd.randint(-2, 2)
-            thickness = rnd.choice((1, 1, 2, 2, 3))
-            left = x0 + rnd.randint(-pad_x * 2, pad_x * 2)
-            right = x1 + rnd.randint(-pad_x * 2, pad_x * 2)
-            draw.line((left, y, right, y + rnd.randint(-1, 1)), fill=(*rgb, opacity), width=thickness)
-            # Extra partial strands give the ends the natural frayed shape of
-            # a real brush without turning a short phrase into a rectangle.
-            if i % 2 == 0:
-                strand = max(4, (x1 - x0) // 5)
-                draw.line((left - strand, y + rnd.randint(-2, 2), left + strand, y), fill=(*rgb, opacity), width=1)
-                draw.line((right - strand, y, right + strand, y + rnd.randint(-2, 2)), fill=(*rgb, opacity), width=1)
+            if rnd.random() < .12:
+                continue
+            thickness = rnd.choice((1, 1, 1, 2, 2, 3))
+            left = x0 + rnd.randint(-pad_x * 4, pad_x * 5)
+            right = x1 + rnd.randint(-pad_x * 5, pad_x * 4)
+            cursor = left
+            while cursor < right:
+                segment = rnd.randint(max(5, (x1 - x0) // 12), max(8, (x1 - x0) // 3))
+                end = min(right, cursor + segment)
+                pigment = max(45, min(255, opacity + rnd.randint(-50, 35)))
+                draw.line((cursor, y, end, y + rnd.randint(-1, 1)), fill=(*rgb, pigment), width=thickness)
+                cursor = end + rnd.randint(0, max(2, (x1 - x0) // 18))
+            if rnd.random() < .55:
+                strand = rnd.randint(max(4, (x1 - x0) // 14), max(8, (x1 - x0) // 5))
+                draw.line((left - strand, y + rnd.randint(-3, 3), left + strand, y), fill=(*rgb, opacity), width=1)
+                draw.line((right - strand, y, right + strand, y + rnd.randint(-3, 3)), fill=(*rgb, opacity), width=1)
+    elif grunge:
+        # A dense banner with random paint loss and frayed, uneven edges.
+        # The defects are seeded, so they remain stable as the animation draws
+        # left-to-right instead of flickering from frame to frame.
+        draw.polygon(top + list(reversed(bottom)), fill=(*rgb, opacity))
+        specks = min(100, max(24, int((x1 - x0) / 9)))
+        for _ in range(specks):
+            if rnd.random() < .72:
+                edge = rnd.choice((x0, x1))
+                direction = 1 if edge == x0 else -1
+                x = edge + direction * rnd.randint(0, max(2, (x1 - x0) // 4))
+            else:
+                x = rnd.randint(x0, x1)
+            y = rnd.randint(y0, y1)
+            width = rnd.randint(1, max(3, (x1 - x0) // 16))
+            hole_height = rnd.randint(1, max(2, height // 6))
+            draw.rectangle((x, y, x + width, y + hole_height), fill=(0, 0, 0, 0))
+        for _ in range(max(4, height // 9)):
+            y = rnd.randint(y0 - edge_variation, y1 + edge_variation)
+            start = x0 + rnd.randint(-pad_x * 3, pad_x * 5)
+            end = x1 + rnd.randint(-pad_x * 5, pad_x * 3)
+            draw.line((start, y, end, y + rnd.randint(-1, 1)), fill=(*rgb, max(35, opacity // 2)), width=1)
     else:
         # Establish a continuous pigment body first.  A narrow word has too
         # little area for a polygon-only stroke to read as filled once the
@@ -436,13 +465,14 @@ def generate_video(image_path: str, lines: list[dict], title_time: float, gap: f
                 f = min(1.0, max(0.0, (t-cursor) / line_duration))
                 if f:
                     # The outline closely follows the exact words, while the
-                    # filled and brush styles use the natural headline band.
+                    # filled, brush, and grunge styles use the natural headline band.
                     render_box = line["box"] if marker_style == "outline" else line.get("line_box", line["box"])
                     dark_background = box_is_dark(image, render_box)
                     opacity = 65 if dark_background and marker_style == "outline" else (110 if dark_background else 118)
                     line_color = line.get("color", color)
                     composed.alpha_composite(marker_layer(image.size, render_box, line_color, f, n, opacity,
-                                                          outline=marker_style == "outline", brush=marker_style == "brush"))
+                                                          outline=marker_style == "outline", brush=marker_style == "brush",
+                                                          grunge=marker_style == "grunge"))
                     visible_box = (render_box[0], render_box[1], round(render_box[0] + (render_box[2] - render_box[0]) * f), render_box[3])
                     preserve_text_appearance(composed, image, visible_box, line_color, dark_background)
                 cursor += line_duration + (gap if n < len(lines)-1 else 0)
@@ -476,7 +506,7 @@ class App(TkinterDnD.Tk):
         self.duration = tk.StringVar(value=str(self.values.get("duration", 5.0)))
         self.color = tk.StringVar(value=self.values.get("color", "#FFF200"))
         saved_style = self.values.get("marker_style")
-        if saved_style not in ("filled", "outline", "brush"):
+        if saved_style not in ("filled", "outline", "brush", "grunge"):
             saved_style = "outline" if self.values.get("outline_style", self.values.get("tight_shape", False)) else "filled"
         self.marker_style = tk.StringVar(value=saved_style)
         self.manual_headline = tk.StringVar(); self.filename = tk.StringVar(value="headline_highlight.mp4")
@@ -527,6 +557,7 @@ class App(TkinterDnD.Tk):
         ttk.Radiobutton(style_frame, text="Filled", variable=self.marker_style, value="filled").pack(side="left")
         ttk.Radiobutton(style_frame, text="Outline", variable=self.marker_style, value="outline").pack(side="left", padx=(8, 0))
         ttk.Radiobutton(style_frame, text="Brush", variable=self.marker_style, value="brush").pack(side="left", padx=(8, 0))
+        ttk.Radiobutton(style_frame, text="Grunge", variable=self.marker_style, value="grunge").pack(side="left", padx=(8, 0))
         ttk.Label(grid, text="Output filename").grid(row=3, column=0, sticky="w", pady=3)
         ttk.Entry(grid, textvariable=self.filename).grid(row=3, column=1, columnspan=3, sticky="ew", pady=3)
         ttk.Label(grid, text="Output folder").grid(row=4, column=0, sticky="w", pady=3)
