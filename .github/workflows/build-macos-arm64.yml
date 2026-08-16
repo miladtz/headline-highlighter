@@ -33,8 +33,11 @@ jobs:
         run: |
           APP="dist/Headline Highlighter.app"
           FRAMEWORKS="$APP/Contents/Frameworks"
-          dylibbundler -od -b -x "$FRAMEWORKS/ffmpeg" -d "$FRAMEWORKS" -p @executable_path/../Frameworks
-          dylibbundler -od -b -x "$FRAMEWORKS/tesseract/tesseract" -d "$FRAMEWORKS" -p @executable_path/../Frameworks
+          # Do not use Frameworks as dylibbundler's output: it already holds
+          # PyInstaller's own files and dylibbundler clears its destination.
+          # Each runtime gets an isolated dependency directory and rpath.
+          dylibbundler -od -b -x "$FRAMEWORKS/ffmpeg" -d "$APP/Contents/Resources/ffmpeg-libs" -p @executable_path/../Resources/ffmpeg-libs
+          dylibbundler -od -b -x "$FRAMEWORKS/tesseract/tesseract" -d "$APP/Contents/Resources/tesseract-libs" -p @executable_path/../Resources/tesseract-libs
       - name: Run application tests with bundled OCR runtime
         run: python3 -m unittest discover -s tests -v
       - name: Smoke-test Apple Silicon package
@@ -45,6 +48,8 @@ jobs:
           test -x "$APP/Contents/MacOS/Headline Highlighter"
           test -x "$APP/Contents/Frameworks/ffmpeg"
           test -x "$APP/Contents/Frameworks/tesseract/tesseract"
+          test -d "$APP/Contents/Resources/ffmpeg-libs"
+          test -d "$APP/Contents/Resources/tesseract-libs"
           file "$APP/Contents/MacOS/Headline Highlighter" | grep -q 'arm64'
       - name: Create downloadable ZIP
         shell: bash
