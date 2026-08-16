@@ -155,6 +155,11 @@ class HeadlineSelectionTests(unittest.TestCase):
         self.assertTrue(box_is_dark(Image.new("RGBA", (20, 20), "#10233d"), (0, 0, 20, 20)))
         self.assertFalse(box_is_dark(Image.new("RGBA", (20, 20), "white"), (0, 0, 20, 20)))
 
+    def test_background_classifier_uses_dark_surrounding_area_for_small_white_word(self):
+        image = Image.new("RGBA", (50, 40), "#10233d")
+        image.paste("white", (17, 10, 33, 30))
+        self.assertTrue(box_is_dark(image, (17, 10, 33, 30)))
+
     def test_outline_marker_style_leaves_its_centre_unfilled(self):
         filled = marker_layer((100, 40), (10, 10, 90, 30), "#FFF200", 1, 1, 150)
         outline = marker_layer((100, 40), (10, 10, 90, 30), "#FFF200", 1, 1, 150, outline=True)
