@@ -270,8 +270,8 @@ def find_phrase_boxes(lines: list[dict], phrase_input: str, split_phrases: bool 
 
 
 def marker_layer(size: tuple[int, int], box: tuple[int, int, int, int], color: str, fraction: float, seed: int,
-                 opacity: int, outline: bool = False) -> Image.Image:
-    """Create a stable filled marker band or a hand-drawn outline and reveal it."""
+                 opacity: int, outline: bool = False, brush: bool = False) -> Image.Image:
+    """Create a filled marker band, hand-drawn outline, or dry-brush stroke."""
     x0, y0, x1, y1 = box
     pad_x = max(2, (y1-y0) // 12); pad_y = max(1, (y1-y0) // 16)
     x0 -= pad_x; x1 += pad_x; y0 -= pad_y; y1 += pad_y
@@ -308,6 +308,22 @@ def marker_layer(size: tuple[int, int], box: tuple[int, int, int, int], color: s
         draw.line(bottom, fill=(*rgb, min(255, opacity + 90)), width=edge_width, joint="curve")
         draw.line([top[0], bottom[0]], fill=(*rgb, min(255, opacity + 90)), width=edge_width)
         draw.line([top[-1], bottom[-1]], fill=(*rgb, min(255, opacity + 90)), width=edge_width)
+    elif brush:
+        # Layered bristles create a dry-brush look: strong, uneven coverage
+        # through the centre and fine broken strands around the top and bottom.
+        bristles = max(10, height // 3)
+        for i in range(bristles):
+            y = y0 + height * i / max(1, bristles - 1) + rnd.randint(-2, 2)
+            thickness = rnd.choice((1, 1, 2, 2, 3))
+            left = x0 + rnd.randint(-pad_x * 2, pad_x * 2)
+            right = x1 + rnd.randint(-pad_x * 2, pad_x * 2)
+            draw.line((left, y, right, y + rnd.randint(-1, 1)), fill=(*rgb, opacity), width=thickness)
+            # Extra partial strands give the ends the natural frayed shape of
+            # a real brush without turning a short phrase into a rectangle.
+            if i % 2 == 0:
+                strand = max(4, (x1 - x0) // 5)
+                draw.line((left - strand, y + rnd.randint(-2, 2), left + strand, y), fill=(*rgb, opacity), width=1)
+                draw.line((right - strand, y, right + strand, y + rnd.randint(-2, 2)), fill=(*rgb, opacity), width=1)
     else:
         # Establish a continuous pigment body first.  A narrow word has too
         # little area for a polygon-only stroke to read as filled once the
@@ -393,7 +409,7 @@ def zoom_frame(image: Image.Image, center: tuple[float, float], scale: float) ->
 
 
 def generate_video(image_path: str, lines: list[dict], title_time: float, gap: float, duration: float,
-                   color: str, destination: str, progress, outline_style: bool = False) -> None:
+                   color: str, destination: str, progress, marker_style: str = "filled") -> None:
     image = Image.open(image_path).convert("RGBA")
     fps = 30
     frames = max(1, round(duration * fps))
@@ -419,13 +435,14 @@ def generate_video(image_path: str, lines: list[dict], title_time: float, gap: f
                 line_duration = highlight_durations[n]
                 f = min(1.0, max(0.0, (t-cursor) / line_duration))
                 if f:
-                    # Filled bands use the headline line's natural height.
-                    # The optional outline closely follows the exact words.
-                    render_box = line["box"] if outline_style else line.get("line_box", line["box"])
+                    # The outline closely follows the exact words, while the
+                    # filled and brush styles use the natural headline band.
+                    render_box = line["box"] if marker_style == "outline" else line.get("line_box", line["box"])
                     dark_background = box_is_dark(image, render_box)
-                    opacity = 96 if dark_background and not outline_style else (65 if dark_background else 118)
+                    opacity = 65 if dark_background and marker_style == "outline" else (110 if dark_background else 118)
                     line_color = line.get("color", color)
-                    composed.alpha_composite(marker_layer(image.size, render_box, line_color, f, n, opacity, outline=outline_style))
+                    composed.alpha_composite(marker_layer(image.size, render_box, line_color, f, n, opacity,
+                                                          outline=marker_style == "outline", brush=marker_style == "brush"))
                     visible_box = (render_box[0], render_box[1], round(render_box[0] + (render_box[2] - render_box[0]) * f), render_box[3])
                     preserve_text_appearance(composed, image, visible_box, line_color, dark_background)
                 cursor += line_duration + (gap if n < len(lines)-1 else 0)
@@ -458,7 +475,10 @@ class App(TkinterDnD.Tk):
         self.gap = tk.StringVar(value=str(self.values.get("gap", 0.18)))
         self.duration = tk.StringVar(value=str(self.values.get("duration", 5.0)))
         self.color = tk.StringVar(value=self.values.get("color", "#FFF200"))
-        self.outline_style = tk.BooleanVar(value=bool(self.values.get("outline_style", self.values.get("tight_shape", False))))
+        saved_style = self.values.get("marker_style")
+        if saved_style not in ("filled", "outline", "brush"):
+            saved_style = "outline" if self.values.get("outline_style", self.values.get("tight_shape", False)) else "filled"
+        self.marker_style = tk.StringVar(value=saved_style)
         self.manual_headline = tk.StringVar(); self.filename = tk.StringVar(value="headline_highlight.mp4")
         self.folder = tk.StringVar(value=str(Path.home() / "Videos"))
         self.phrase_rows = [(tk.StringVar(), tk.StringVar(value="#FFF200")) for _ in range(10)]
@@ -471,7 +491,7 @@ class App(TkinterDnD.Tk):
 
     def save_settings(self):
         SETTINGS_PATH.parent.mkdir(parents=True, exist_ok=True)
-        SETTINGS_PATH.write_text(json.dumps({"title_time": self.title_time.get(), "gap": self.gap.get(), "duration": self.duration.get(), "color": self.color.get(), "outline_style": self.outline_style.get()}), encoding="utf-8")
+        SETTINGS_PATH.write_text(json.dumps({"title_time": self.title_time.get(), "gap": self.gap.get(), "duration": self.duration.get(), "color": self.color.get(), "marker_style": self.marker_style.get()}), encoding="utf-8")
 
     def build_ui(self):
         outer = ttk.Frame(self, padding=16); outer.pack(fill="both", expand=True)
@@ -502,7 +522,11 @@ class App(TkinterDnD.Tk):
         ttk.Label(grid, text="Highlight color").grid(row=0, column=2, sticky="w", padx=(25, 10))
         ttk.Entry(grid, textvariable=self.color, width=10).grid(row=0, column=3, sticky="ew")
         ttk.Button(grid, text="Choose…", command=self.choose_color).grid(row=1, column=3, sticky="w", pady=3)
-        ttk.Checkbutton(grid, text="Outline marker style (yellow-style)", variable=self.outline_style).grid(row=2, column=2, columnspan=2, sticky="w", padx=(25, 0), pady=3)
+        style_frame = ttk.Frame(grid); style_frame.grid(row=2, column=2, columnspan=2, sticky="w", padx=(25, 0), pady=3)
+        ttk.Label(style_frame, text="Highlight style").pack(side="left", padx=(0, 8))
+        ttk.Radiobutton(style_frame, text="Filled", variable=self.marker_style, value="filled").pack(side="left")
+        ttk.Radiobutton(style_frame, text="Outline", variable=self.marker_style, value="outline").pack(side="left", padx=(8, 0))
+        ttk.Radiobutton(style_frame, text="Brush", variable=self.marker_style, value="brush").pack(side="left", padx=(8, 0))
         ttk.Label(grid, text="Output filename").grid(row=3, column=0, sticky="w", pady=3)
         ttk.Entry(grid, textvariable=self.filename).grid(row=3, column=1, columnspan=3, sticky="ew", pady=3)
         ttk.Label(grid, text="Output folder").grid(row=4, column=0, sticky="w", pady=3)
@@ -641,7 +665,7 @@ class App(TkinterDnD.Tk):
         self.save_settings(); self.generate_button.configure(state="disabled"); self.progress["value"] = 0
         def task():
             try:
-                generate_video(self.image_path, self.highlight_items, title_time, gap, duration, self.color.get(), destination, lambda p: self.after(0, lambda: self.progress.configure(value=p)), outline_style=self.outline_style.get())
+                generate_video(self.image_path, self.highlight_items, title_time, gap, duration, self.color.get(), destination, lambda p: self.after(0, lambda: self.progress.configure(value=p)), marker_style=self.marker_style.get())
                 source_destination = source_copy_destination(self.image_path, destination)
                 shutil.copy2(self.image_path, source_destination)
                 self.after(0, lambda: messagebox.showinfo(APP_NAME, f"Video created:\n{destination}\n\nSource image saved:\n{source_destination}"))
