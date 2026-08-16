@@ -1,0 +1,57 @@
+name: Build macOS Apple Silicon app
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  build:
+    # GitHub-hosted macos-14 is an ARM64 (Apple Silicon) runner.
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install Python build dependencies
+        run: python3 -m pip install --upgrade pip -r requirements.txt
+      - name: Install and stage ARM64 FFmpeg and Tesseract
+        shell: bash
+        run: |
+          brew install ffmpeg tesseract tesseract-lang dylibbundler
+          mkdir -p vendor/macos/tesseract/tessdata
+          cp "$(command -v ffmpeg)" vendor/macos/ffmpeg
+          cp "$(command -v tesseract)" vendor/macos/tesseract/tesseract
+          cp "$(brew --prefix tesseract)/share/tessdata/eng.traineddata" vendor/macos/tesseract/tessdata/eng.traineddata
+          chmod +x vendor/macos/ffmpeg vendor/macos/tesseract/tesseract
+      - name: Build Apple Silicon application bundle
+        run: python3 build_macos.py
+      - name: Bundle FFmpeg and Tesseract dynamic libraries
+        shell: bash
+        run: |
+          APP="dist/Headline Highlighter.app"
+          FRAMEWORKS="$APP/Contents/Frameworks"
+          dylibbundler -od -b -x "$FRAMEWORKS/ffmpeg" -d "$FRAMEWORKS" -p @executable_path/../Frameworks
+          dylibbundler -od -b -x "$FRAMEWORKS/tesseract/tesseract" -d "$FRAMEWORKS" -p @executable_path/../Frameworks
+      - name: Run application tests with bundled OCR runtime
+        run: python3 -m unittest discover -s tests -v
+      - name: Smoke-test Apple Silicon package
+        shell: bash
+        run: |
+          APP="dist/Headline Highlighter.app"
+          test -d "$APP"
+          test -x "$APP/Contents/MacOS/Headline Highlighter"
+          test -x "$APP/Contents/Frameworks/ffmpeg"
+          test -x "$APP/Contents/Frameworks/tesseract/tesseract"
+          file "$APP/Contents/MacOS/Headline Highlighter" | grep -q 'arm64'
+      - name: Create downloadable ZIP
+        shell: bash
+        run: ditto -c -k --sequesterRsrc --keepParent "dist/Headline Highlighter.app" HeadlineHighlighter-macos-arm64.zip
+      - name: Upload Headline Highlighter for macOS ARM64
+        uses: actions/upload-artifact@v4
+        with:
+          name: HeadlineHighlighter-macos-arm64
+          path: HeadlineHighlighter-macos-arm64.zip
+          if-no-files-found: error
