@@ -48,6 +48,16 @@ def normalise(text: str) -> str:
     return re.sub(r"\W+", "", text).casefold()
 
 
+def match_token(text: str) -> str:
+    """Normalise OCR token variants, including Roman-numeral glyph confusion."""
+    token = normalise(text)
+    # Tesseract commonly reads II as Il, lI, or 11. Restrict this equivalence
+    # to all-ambiguous tokens so ordinary words are never altered.
+    if token and re.fullmatch(r"[il1]+", token):
+        return "i" * len(token)
+    return token
+
+
 def ocr_lines(image: Image.Image, psm: int = 11) -> list[dict]:
     data = pytesseract.image_to_data(image, output_type=pytesseract.Output.DICT, config=f"--psm {psm}")
     grouped: dict[tuple[int, int, int, int], list[int]] = {}
@@ -191,18 +201,25 @@ def source_copy_destination(source_path: str, video_destination: str) -> str:
     return str(Path(video_destination).with_suffix(suffix))
 
 
+def line_highlight_durations(lines: list[dict], title_time: float) -> list[float]:
+    """Allocate title time by marker distance for one consistent draw speed."""
+    widths = [max(1, line["box"][2] - line["box"][0]) for line in lines]
+    total_width = sum(widths)
+    return [title_time * width / total_width for width in widths]
+
+
 def find_phrase_boxes(lines: list[dict], phrase_input: str, split_phrases: bool = True) -> tuple[list[dict], list[str]]:
     """Find phrase boxes; separate UI fields treat commas as literal text."""
     requested = [piece.strip() for piece in phrase_input.split(",") if piece.strip()] if split_phrases else [phrase_input.strip()]
     words = [(line_index, word) for line_index, line in enumerate(lines) for word in line.get("words", [])]
     found, missing = [], []
     for phrase in requested:
-        wanted = normalise(phrase)
+        wanted = "".join(match_token(word) for word in phrase.split())
         match = None
         for start in range(len(words)):
             joined = ""
-            for end in range(start, min(len(words), start + 18)):
-                joined += normalise(words[end][1]["text"])
+            for end in range(start, min(len(words), start + 40)):
+                joined += match_token(words[end][1]["text"])
                 # A one-word input such as "fire" should select the OCR word
                 # "fires" as a whole, while multi-word phrases stay exact.
                 one_word_prefix = end == start and joined.startswith(wanted)
@@ -222,7 +239,9 @@ def find_phrase_boxes(lines: list[dict], phrase_input: str, split_phrases: bool 
         for line_index, matched_words in by_line.items():
             x0 = min(word["box"][0] for word in matched_words); y0 = min(word["box"][1] for word in matched_words)
             x1 = max(word["box"][2] for word in matched_words); y1 = max(word["box"][3] for word in matched_words)
-            found.append({"text": phrase, "box": (x0, y0, x1, y1), "height": y1 - y0})
+            line_box = lines[line_index]["box"]
+            found.append({"text": phrase, "box": (x0, y0, x1, y1),
+                          "line_box": (x0, line_box[1], x1, line_box[3]), "height": y1 - y0})
     return sorted(found, key=lambda item: (item["box"][1], item["box"][0])), missing
 
 
@@ -285,18 +304,25 @@ def preserve_text_appearance(composed: Image.Image, original: Image.Image, box: 
 
 
 def zoom_frame(image: Image.Image, center: tuple[float, float], scale: float) -> Image.Image:
-    """Return a smooth crop-and-resize zoom, keeping the headline as the focus."""
+    """Return a sub-pixel smooth zoom, keeping the headline as the focus."""
     if scale <= 1:
         return image
     crop_w, crop_h = image.width / scale, image.height / scale
     left = min(max(0, center[0] - crop_w / 2), image.width - crop_w)
     top = min(max(0, center[1] - crop_h / 2), image.height - crop_h)
-    crop = image.crop((round(left), round(top), round(left + crop_w), round(top + crop_h)))
-    return crop.resize(image.size, Image.Resampling.LANCZOS)
+    # crop()+resize() rounds the crop rectangle each frame, producing visible
+    # one-pixel shakes. An affine transform retains fractional coordinates.
+    inverse_scale = 1 / scale
+    return image.transform(
+        image.size,
+        Image.Transform.AFFINE,
+        (inverse_scale, 0, left, 0, inverse_scale, top),
+        resample=Image.Resampling.BICUBIC,
+    )
 
 
-def generate_video(image_path: str, lines: list[dict], line_time: float, gap: float, duration: float,
-                   color: str, destination: str, progress) -> None:
+def generate_video(image_path: str, lines: list[dict], title_time: float, gap: float, duration: float,
+                   color: str, destination: str, progress, tight_shape: bool = False) -> None:
     image = Image.open(image_path).convert("RGBA")
     fps = 30
     frames = max(1, round(duration * fps))
@@ -310,6 +336,7 @@ def generate_video(image_path: str, lines: list[dict], line_time: float, gap: fl
                "-r", str(fps), "-i", "-", "-an", "-vf", "pad=ceil(iw/2)*2:ceil(ih/2)*2",
                "-c:v", "libx264", "-pix_fmt", "yuv420p", "-movflags", "+faststart", destination]
     process = subprocess.Popen(command, stdin=subprocess.PIPE, stderr=subprocess.PIPE)
+    highlight_durations = line_highlight_durations(lines, title_time)
     focus = ((min(line["box"][0] for line in lines) + max(line["box"][2] for line in lines)) / 2,
              (min(line["box"][1] for line in lines) + max(line["box"][3] for line in lines)) / 2)
     try:
@@ -318,15 +345,17 @@ def generate_video(image_path: str, lines: list[dict], line_time: float, gap: fl
             composed = image.copy()
             cursor = 0.0
             for n, line in enumerate(lines):
-                f = min(1.0, max(0.0, (t-cursor) / line_time))
+                line_duration = highlight_durations[n]
+                f = min(1.0, max(0.0, (t-cursor) / line_duration))
                 if f:
-                    dark_background = box_is_dark(image, line["box"])
+                    render_box = line["box"] if tight_shape else line.get("line_box", line["box"])
+                    dark_background = box_is_dark(image, render_box)
                     opacity = 38 if dark_background else 118
                     line_color = line.get("color", color)
-                    composed.alpha_composite(marker_layer(image.size, line["box"], line_color, f, n, opacity))
-                    visible_box = (line["box"][0], line["box"][1], round(line["box"][0] + (line["box"][2] - line["box"][0]) * f), line["box"][3])
+                    composed.alpha_composite(marker_layer(image.size, render_box, line_color, f, n, opacity))
+                    visible_box = (render_box[0], render_box[1], round(render_box[0] + (render_box[2] - render_box[0]) * f), render_box[3])
                     preserve_text_appearance(composed, image, visible_box, line_color, dark_background)
-                cursor += line_time + (gap if n < len(lines)-1 else 0)
+                cursor += line_duration + (gap if n < len(lines)-1 else 0)
             composed = zoom_frame(composed, focus, 1 + .08 * frame / max(1, frames - 1))
             try:
                 process.stdin.write(composed.tobytes())
@@ -352,10 +381,11 @@ class App(TkinterDnD.Tk):
         self.title(APP_NAME); self.geometry("820x760"); self.minsize(720, 680)
         self.image_path = ""; self.image_height = 0; self.all_lines: list[dict] = []; self.ocr_variants: list[list[dict]] = []; self.headline_variants: list[list[dict]] = []; self.headline_lines: list[dict] = []; self.detected_headline = ""; self.highlight_items: list[dict] = []
         self.values = self.load_settings()
-        self.line_time = tk.StringVar(value=str(self.values.get("line_time", 0.8)))
+        self.title_time = tk.StringVar(value=str(self.values.get("title_time", 3.0)))
         self.gap = tk.StringVar(value=str(self.values.get("gap", 0.18)))
         self.duration = tk.StringVar(value=str(self.values.get("duration", 5.0)))
         self.color = tk.StringVar(value=self.values.get("color", "#FFF200"))
+        self.tight_shape = tk.BooleanVar(value=bool(self.values.get("tight_shape", False)))
         self.manual_headline = tk.StringVar(); self.filename = tk.StringVar(value="headline_highlight.mp4")
         self.folder = tk.StringVar(value=str(Path.home() / "Videos"))
         self.phrase_rows = [(tk.StringVar(), tk.StringVar(value="#FFF200")) for _ in range(10)]
@@ -368,7 +398,7 @@ class App(TkinterDnD.Tk):
 
     def save_settings(self):
         SETTINGS_PATH.parent.mkdir(parents=True, exist_ok=True)
-        SETTINGS_PATH.write_text(json.dumps({"line_time": self.line_time.get(), "gap": self.gap.get(), "duration": self.duration.get(), "color": self.color.get()}), encoding="utf-8")
+        SETTINGS_PATH.write_text(json.dumps({"title_time": self.title_time.get(), "gap": self.gap.get(), "duration": self.duration.get(), "color": self.color.get(), "tight_shape": self.tight_shape.get()}), encoding="utf-8")
 
     def build_ui(self):
         outer = ttk.Frame(self, padding=16); outer.pack(fill="both", expand=True)
@@ -392,13 +422,14 @@ class App(TkinterDnD.Tk):
             self.phrase_color_buttons.append(button)
         phrase_frame.columnconfigure(1, weight=1); phrase_frame.columnconfigure(4, weight=1)
         grid = ttk.Frame(outer); grid.pack(fill="x", pady=12); grid.columnconfigure(1, weight=1); grid.columnconfigure(3, weight=1)
-        fields = [("Line highlight time (seconds)", self.line_time), ("Gap between lines (seconds)", self.gap), ("Total video length (seconds)", self.duration)]
+        fields = [("Title highlighting time (seconds)", self.title_time), ("Gap between lines (seconds)", self.gap), ("Total video length (seconds)", self.duration)]
         for row, (label, variable) in enumerate(fields):
             ttk.Label(grid, text=label).grid(row=row, column=0, sticky="w", padx=(0, 10), pady=3)
             ttk.Entry(grid, textvariable=variable, width=12).grid(row=row, column=1, sticky="ew", pady=3)
         ttk.Label(grid, text="Highlight color").grid(row=0, column=2, sticky="w", padx=(25, 10))
         ttk.Entry(grid, textvariable=self.color, width=10).grid(row=0, column=3, sticky="ew")
         ttk.Button(grid, text="Choose…", command=self.choose_color).grid(row=1, column=3, sticky="w", pady=3)
+        ttk.Checkbutton(grid, text="Tight word-box shape (outline style)", variable=self.tight_shape).grid(row=2, column=2, columnspan=2, sticky="w", padx=(25, 0), pady=3)
         ttk.Label(grid, text="Output filename").grid(row=3, column=0, sticky="w", pady=3)
         ttk.Entry(grid, textvariable=self.filename).grid(row=3, column=1, columnspan=3, sticky="ew", pady=3)
         ttk.Label(grid, text="Output folder").grid(row=4, column=0, sticky="w", pady=3)
@@ -458,13 +489,25 @@ class App(TkinterDnD.Tk):
         selected = self.headline_lines
         manual_override = bool(self.manual_headline.get().strip()) and normalise(self.manual_headline.get()) != normalise(self.detected_headline)
         if manual_override:
-            matches = [(find_manual_headline(lines, self.manual_headline.get()), lines) for lines in self.ocr_variants]
-            selected, matched_lines = max(matches, key=lambda choice: headline_quality(choice[0]))
-            if selected:
+            # A typed title should highlight the matched words, not their
+            # entire OCR line: an OCR line can contain both a page header
+            # (such as the BBC logo) and the first title word.
+            exact_options = []
+            for lines in self.ocr_variants:
+                word_matches, missing = find_phrase_boxes(lines, self.manual_headline.get(), split_phrases=False)
+                if not missing:
+                    exact_options.append((word_matches, lines))
+            if exact_options:
+                selected, matched_lines = min(exact_options, key=lambda choice: sum((item["box"][2] - item["box"][0]) * (item["box"][3] - item["box"][1]) for item in choice[0]))
                 self.all_lines = matched_lines
             else:
-                self.status.configure(text="Manual headline was not found by OCR. Check spelling or use a clearer image.")
-                return False
+                matches = [(find_manual_headline(lines, self.manual_headline.get()), lines) for lines in self.ocr_variants]
+                selected, matched_lines = max(matches, key=lambda choice: headline_quality(choice[0]))
+                if selected:
+                    self.all_lines = matched_lines
+                else:
+                    self.status.configure(text="Manual headline was not found by OCR. Check spelling or use a clearer image.")
+                    return False
         phrase_entries = [(phrase.get().strip(), color.get()) for phrase, color in self.phrase_rows if phrase.get().strip()]
         if phrase_entries:
             matched, missing = [], []
@@ -509,19 +552,22 @@ class App(TkinterDnD.Tk):
     def start_generate(self):
         if not self.image_path or not self.apply_selection(): return messagebox.showwarning(APP_NAME, "Choose a screenshot and a detectable headline or phrase first.")
         try:
-            line_time, gap, duration = map(float, (self.line_time.get(), self.gap.get(), self.duration.get()))
+            title_time, gap, duration = map(float, (self.title_time.get(), self.gap.get(), self.duration.get()))
             phrase_colors = [color.get() for phrase, color in self.phrase_rows if phrase.get().strip()]
-            if (min(line_time, duration) <= 0 or gap < 0 or
+            if (min(title_time, duration) <= 0 or gap < 0 or
                     not re.fullmatch(r"#[0-9a-fA-F]{6}", self.color.get()) or
                     any(not re.fullmatch(r"#[0-9a-fA-F]{6}", value) for value in phrase_colors)): raise ValueError
         except ValueError: return messagebox.showwarning(APP_NAME, "Use positive times, a non-negative gap, and a #RRGGBB color.")
+        total_animation = title_time + gap * max(0, len(self.highlight_items) - 1)
+        if duration < total_animation:
+            return messagebox.showwarning(APP_NAME, "Total video length must be at least the title highlighting time plus all line gaps.")
         destination = timestamped_destination(self.folder.get(), self.filename.get())
         try: Path(destination).parent.mkdir(parents=True, exist_ok=True)
         except OSError as exc: return messagebox.showerror(APP_NAME, f"Cannot create output folder.\n{exc}")
         self.save_settings(); self.generate_button.configure(state="disabled"); self.progress["value"] = 0
         def task():
             try:
-                generate_video(self.image_path, self.highlight_items, line_time, gap, duration, self.color.get(), destination, lambda p: self.after(0, lambda: self.progress.configure(value=p)))
+                generate_video(self.image_path, self.highlight_items, title_time, gap, duration, self.color.get(), destination, lambda p: self.after(0, lambda: self.progress.configure(value=p)), tight_shape=self.tight_shape.get())
                 source_destination = source_copy_destination(self.image_path, destination)
                 shutil.copy2(self.image_path, source_destination)
                 self.after(0, lambda: messagebox.showinfo(APP_NAME, f"Video created:\n{destination}\n\nSource image saved:\n{source_destination}"))
