@@ -13,6 +13,7 @@ import tempfile
 from datetime import datetime
 from difflib import SequenceMatcher
 from pathlib import Path
+from statistics import median
 from typing import Iterable
 
 import tkinter as tk
@@ -146,6 +147,29 @@ def headline_quality(lines: list[dict]) -> float:
     return sum(max(1, len(normalise(line["text"]))) * line["height"] for line in lines) + len(lines) * 140
 
 
+def trim_mixed_title_lines(lines: list[dict]) -> list[dict]:
+    """Remove small labels OCR merged beside an otherwise large headline."""
+    word_heights = [word["box"][3] - word["box"][1]
+                    for line in lines for word in line.get("words", [])]
+    if not word_heights:
+        return lines
+    # A page section label often shares the OCR *line* with the headline but
+    # its glyphs are much smaller.  The median title-word height provides a
+    # stable cutoff without discarding short title words such as “II” or “to”.
+    minimum_height = max(8, median(word_heights) * .58)
+    trimmed = []
+    for line in lines:
+        title_words = [word for word in line.get("words", [])
+                       if word["box"][3] - word["box"][1] >= minimum_height]
+        if not title_words:
+            continue
+        x0 = min(word["box"][0] for word in title_words); y0 = min(word["box"][1] for word in title_words)
+        x1 = max(word["box"][2] for word in title_words); y1 = max(word["box"][3] for word in title_words)
+        trimmed.append({**line, "text": " ".join(word["text"] for word in title_words),
+                        "box": (x0, y0, x1, y1), "height": y1 - y0, "words": title_words})
+    return trimmed or lines
+
+
 def find_manual_headline(lines: list[dict], headline: str) -> list[dict]:
     """Resolve a typed headline even when OCR drops or misreads a few words."""
     wanted = normalise(headline)
@@ -245,8 +269,9 @@ def find_phrase_boxes(lines: list[dict], phrase_input: str, split_phrases: bool 
     return sorted(found, key=lambda item: (item["box"][1], item["box"][0])), missing
 
 
-def marker_layer(size: tuple[int, int], box: tuple[int, int, int, int], color: str, fraction: float, seed: int, opacity: int) -> Image.Image:
-    """Create one stable, lightly imperfect highlighter band and reveal it."""
+def marker_layer(size: tuple[int, int], box: tuple[int, int, int, int], color: str, fraction: float, seed: int,
+                 opacity: int, outline: bool = False) -> Image.Image:
+    """Create a stable filled marker band or a hand-drawn outline and reveal it."""
     x0, y0, x1, y1 = box
     pad_x = max(2, (y1-y0) // 12); pad_y = max(1, (y1-y0) // 16)
     x0 -= pad_x; x1 += pad_x; y0 -= pad_y; y1 += pad_y
@@ -265,7 +290,16 @@ def marker_layer(size: tuple[int, int], box: tuple[int, int, int, int], color: s
         x = x0 + (x1 - x0) * i / segments
         top.append((x, y0 + rnd.randint(-edge_variation, edge_variation)))
         bottom.append((x, y1 + rnd.randint(-edge_variation, edge_variation)))
-    draw.polygon(top + list(reversed(bottom)), fill=(*rgb, opacity))
+    if outline:
+        # The outline option deliberately leaves the interior untouched.  It
+        # is useful for the compact, yellow-style treatment of short phrases.
+        edge_width = max(1, height // 18)
+        draw.line(top, fill=(*rgb, min(255, opacity + 90)), width=edge_width, joint="curve")
+        draw.line(bottom, fill=(*rgb, min(255, opacity + 90)), width=edge_width, joint="curve")
+        draw.line([top[0], bottom[0]], fill=(*rgb, min(255, opacity + 90)), width=edge_width)
+        draw.line([top[-1], bottom[-1]], fill=(*rgb, min(255, opacity + 90)), width=edge_width)
+    else:
+        draw.polygon(top + list(reversed(bottom)), fill=(*rgb, opacity))
     # A soft underpass makes the pigment feel absorbed into the page instead
     # of sitting on it as a sharp digital rectangle.
     feather = full_stroke.filter(ImageFilter.GaussianBlur(.65))
@@ -322,7 +356,7 @@ def zoom_frame(image: Image.Image, center: tuple[float, float], scale: float) ->
 
 
 def generate_video(image_path: str, lines: list[dict], title_time: float, gap: float, duration: float,
-                   color: str, destination: str, progress, tight_shape: bool = False) -> None:
+                   color: str, destination: str, progress, outline_style: bool = False) -> None:
     image = Image.open(image_path).convert("RGBA")
     fps = 30
     frames = max(1, round(duration * fps))
@@ -348,11 +382,13 @@ def generate_video(image_path: str, lines: list[dict], title_time: float, gap: f
                 line_duration = highlight_durations[n]
                 f = min(1.0, max(0.0, (t-cursor) / line_duration))
                 if f:
-                    render_box = line["box"] if tight_shape else line.get("line_box", line["box"])
+                    # Filled bands use the headline line's natural height.
+                    # The optional outline closely follows the exact words.
+                    render_box = line["box"] if outline_style else line.get("line_box", line["box"])
                     dark_background = box_is_dark(image, render_box)
-                    opacity = 38 if dark_background else 118
+                    opacity = 96 if dark_background and not outline_style else (65 if dark_background else 118)
                     line_color = line.get("color", color)
-                    composed.alpha_composite(marker_layer(image.size, render_box, line_color, f, n, opacity))
+                    composed.alpha_composite(marker_layer(image.size, render_box, line_color, f, n, opacity, outline=outline_style))
                     visible_box = (render_box[0], render_box[1], round(render_box[0] + (render_box[2] - render_box[0]) * f), render_box[3])
                     preserve_text_appearance(composed, image, visible_box, line_color, dark_background)
                 cursor += line_duration + (gap if n < len(lines)-1 else 0)
@@ -385,7 +421,7 @@ class App(TkinterDnD.Tk):
         self.gap = tk.StringVar(value=str(self.values.get("gap", 0.18)))
         self.duration = tk.StringVar(value=str(self.values.get("duration", 5.0)))
         self.color = tk.StringVar(value=self.values.get("color", "#FFF200"))
-        self.tight_shape = tk.BooleanVar(value=bool(self.values.get("tight_shape", False)))
+        self.outline_style = tk.BooleanVar(value=bool(self.values.get("outline_style", self.values.get("tight_shape", False))))
         self.manual_headline = tk.StringVar(); self.filename = tk.StringVar(value="headline_highlight.mp4")
         self.folder = tk.StringVar(value=str(Path.home() / "Videos"))
         self.phrase_rows = [(tk.StringVar(), tk.StringVar(value="#FFF200")) for _ in range(10)]
@@ -398,7 +434,7 @@ class App(TkinterDnD.Tk):
 
     def save_settings(self):
         SETTINGS_PATH.parent.mkdir(parents=True, exist_ok=True)
-        SETTINGS_PATH.write_text(json.dumps({"title_time": self.title_time.get(), "gap": self.gap.get(), "duration": self.duration.get(), "color": self.color.get(), "tight_shape": self.tight_shape.get()}), encoding="utf-8")
+        SETTINGS_PATH.write_text(json.dumps({"title_time": self.title_time.get(), "gap": self.gap.get(), "duration": self.duration.get(), "color": self.color.get(), "outline_style": self.outline_style.get()}), encoding="utf-8")
 
     def build_ui(self):
         outer = ttk.Frame(self, padding=16); outer.pack(fill="both", expand=True)
@@ -429,7 +465,7 @@ class App(TkinterDnD.Tk):
         ttk.Label(grid, text="Highlight color").grid(row=0, column=2, sticky="w", padx=(25, 10))
         ttk.Entry(grid, textvariable=self.color, width=10).grid(row=0, column=3, sticky="ew")
         ttk.Button(grid, text="Choose…", command=self.choose_color).grid(row=1, column=3, sticky="w", pady=3)
-        ttk.Checkbutton(grid, text="Tight word-box shape (outline style)", variable=self.tight_shape).grid(row=2, column=2, columnspan=2, sticky="w", padx=(25, 0), pady=3)
+        ttk.Checkbutton(grid, text="Outline marker style (yellow-style)", variable=self.outline_style).grid(row=2, column=2, columnspan=2, sticky="w", padx=(25, 0), pady=3)
         ttk.Label(grid, text="Output filename").grid(row=3, column=0, sticky="w", pady=3)
         ttk.Entry(grid, textvariable=self.filename).grid(row=3, column=1, columnspan=3, sticky="ew", pady=3)
         ttk.Label(grid, text="Output folder").grid(row=4, column=0, sticky="w", pady=3)
@@ -477,6 +513,7 @@ class App(TkinterDnD.Tk):
             self.headline_variants = [detect_headline(lines, image.height) for lines in self.ocr_variants]
             choices = list(zip(self.headline_variants, self.ocr_variants))
             self.headline_lines, self.all_lines = max(choices, key=lambda choice: headline_quality(choice[0]))
+            self.headline_lines = trim_mixed_title_lines(self.headline_lines)
             self.highlight_items = list(self.headline_lines)
             detected = " ".join(x["text"] for x in self.headline_lines)
             self.detected_headline = detected
@@ -567,7 +604,7 @@ class App(TkinterDnD.Tk):
         self.save_settings(); self.generate_button.configure(state="disabled"); self.progress["value"] = 0
         def task():
             try:
-                generate_video(self.image_path, self.highlight_items, title_time, gap, duration, self.color.get(), destination, lambda p: self.after(0, lambda: self.progress.configure(value=p)), tight_shape=self.tight_shape.get())
+                generate_video(self.image_path, self.highlight_items, title_time, gap, duration, self.color.get(), destination, lambda p: self.after(0, lambda: self.progress.configure(value=p)), outline_style=self.outline_style.get())
                 source_destination = source_copy_destination(self.image_path, destination)
                 shutil.copy2(self.image_path, source_destination)
                 self.after(0, lambda: messagebox.showinfo(APP_NAME, f"Video created:\n{destination}\n\nSource image saved:\n{source_destination}"))
