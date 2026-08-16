@@ -171,6 +171,11 @@ class HeadlineSelectionTests(unittest.TestCase):
         self.assertGreater(brush.getpixel((50, 20))[3], 0)
         self.assertEqual(brush.getpixel((50, 3))[3], 0)
 
+    def test_grunge_marker_style_paints_a_distressed_banner(self):
+        grunge = marker_layer((100, 40), (10, 10, 90, 30), "#FFF200", 1, 1, 150, grunge=True)
+        self.assertGreater(grunge.getpixel((50, 20))[3], 0)
+        self.assertEqual(grunge.getpixel((50, 3))[3], 0)
+
 
 if __name__ == "__main__":
     unittest.main()
