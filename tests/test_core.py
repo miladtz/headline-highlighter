@@ -5,7 +5,7 @@ from unittest.mock import patch
 
 from PIL import Image
 
-from headline_highlighter import box_is_dark, clean_drop_path, detect_headline, find_manual_headline, find_phrase_boxes, headline_quality, line_highlight_durations, marker_layer, normalise, remove_header_navigation, source_copy_destination, timestamped_destination, trim_mixed_title_lines, zoom_frame, zoom_scale
+from headline_highlighter import box_is_dark, clean_drop_path, crop_to_16_9, detect_headline, find_manual_headline, find_phrase_boxes, headline_quality, line_highlight_durations, marker_layer, normalise, remove_header_navigation, source_copy_destination, timestamped_destination, trim_mixed_title_lines, zoom_frame, zoom_scale
 
 
 class HeadlineSelectionTests(unittest.TestCase):
@@ -102,6 +102,12 @@ class HeadlineSelectionTests(unittest.TestCase):
         self.assertEqual(zoom_scale("out", 1), 1)
         self.assertAlmostEqual(zoom_scale("in", 1), 1.08)
         self.assertAlmostEqual(zoom_scale("out", 0), 1.08)
+
+    def test_center_crop_to_16_by_9_removes_only_the_long_dimension(self):
+        wide = crop_to_16_9(Image.new("RGBA", (2000, 1000), "white"))
+        tall = crop_to_16_9(Image.new("RGBA", (1000, 1000), "white"))
+        self.assertEqual(wide.size, (1778, 1000))
+        self.assertEqual(tall.size, (1000, 562))
 
     def test_phrase_matches_are_returned_in_reading_order(self):
         line = {
