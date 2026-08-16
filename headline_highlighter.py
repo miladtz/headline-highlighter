@@ -283,13 +283,23 @@ def marker_layer(size: tuple[int, int], box: tuple[int, int, int, int], color: s
     height = y1 - y0
     segments = max(12, int((x1 - x0) / 26))
     edge_variation = max(1, min(3, height // 18))
+    # Straight vertical end caps are especially obvious on a one- or two-word
+    # phrase and make an otherwise textured stroke look like a rectangle.
+    # Offset the top and bottom of each cap independently, creating the
+    # naturally tapered, slightly diagonal start and finish of a marker pass.
+    cap_variation = max(3, min(max(4, height // 3), max(4, (x1 - x0) // 8)))
     top, bottom = [], []
     # Generate from the *full* line, so all frames share precisely the same
     # texture; only a left-to-right mask changes during the animation.
     for i in range(segments + 1):
         x = x0 + (x1 - x0) * i / segments
-        top.append((x, y0 + rnd.randint(-edge_variation, edge_variation)))
-        bottom.append((x, y1 + rnd.randint(-edge_variation, edge_variation)))
+        top_x = x
+        bottom_x = x
+        if i in (0, segments):
+            top_x += rnd.randint(-cap_variation, cap_variation)
+            bottom_x += rnd.randint(-cap_variation, cap_variation)
+        top.append((top_x, y0 + rnd.randint(-edge_variation, edge_variation)))
+        bottom.append((bottom_x, y1 + rnd.randint(-edge_variation, edge_variation)))
     if outline:
         # The outline option deliberately leaves the interior untouched.  It
         # is useful for the compact, yellow-style treatment of short phrases.
@@ -299,6 +309,13 @@ def marker_layer(size: tuple[int, int], box: tuple[int, int, int, int], color: s
         draw.line([top[0], bottom[0]], fill=(*rgb, min(255, opacity + 90)), width=edge_width)
         draw.line([top[-1], bottom[-1]], fill=(*rgb, min(255, opacity + 90)), width=edge_width)
     else:
+        # Establish a continuous pigment body first.  A narrow word has too
+        # little area for a polygon-only stroke to read as filled once the
+        # feathering is applied, which made words like “says” resemble an
+        # outline.  This base is deliberately under the irregular edge so
+        # every filled marker, regardless of length, has the same treatment.
+        corner = max(2, min(height // 3, (x1 - x0) // 5))
+        draw.rounded_rectangle((x0, y0, x1, y1), radius=corner, fill=(*rgb, opacity))
         draw.polygon(top + list(reversed(bottom)), fill=(*rgb, opacity))
     # A soft underpass makes the pigment feel absorbed into the page instead
     # of sitting on it as a sharp digital rectangle.
@@ -314,9 +331,29 @@ def marker_layer(size: tuple[int, int], box: tuple[int, int, int, int], color: s
 
 
 def box_is_dark(image: Image.Image, box: tuple[int, int, int, int]) -> bool:
-    """Classify a phrase area while discounting the few bright text pixels."""
-    crop = image.crop(box).convert("RGB").resize((16, 4))
-    brightness = sum(sum(crop.getpixel((x, y))) / 3 for y in range(4) for x in range(16)) / (16 * 4)
+    """Classify the surrounding page, rather than bright headline glyphs."""
+    x0, y0, x1, y1 = box
+    margin = max(3, min(20, max(x1 - x0, y1 - y0) // 3))
+    left, top = max(0, x0 - margin), max(0, y0 - margin)
+    right, bottom = min(image.width, x1 + margin), min(image.height, y1 + margin)
+    # Sampling the border around the phrase avoids a small white word such as
+    # “says” overwhelming a dark-page classification.  It also works on a
+    # light page because the surrounding paper, rather than the dark letters,
+    # determines the result.
+    pixels = []
+    for x in range(left, right, max(1, (right - left) // 16)):
+        for y in range(top, min(bottom, y0)):
+            pixels.append(image.getpixel((x, y))[:3])
+        for y in range(max(top, y1), bottom):
+            pixels.append(image.getpixel((x, y))[:3])
+    for y in range(y0, y1, max(1, (y1 - y0) // 8)):
+        for x in range(left, min(right, x0)):
+            pixels.append(image.getpixel((x, y))[:3])
+        for x in range(max(left, x1), right):
+            pixels.append(image.getpixel((x, y))[:3])
+    if not pixels:
+        pixels = [image.getpixel((min(max(0, x0), image.width - 1), min(max(0, y0), image.height - 1)))[:3]]
+    brightness = sum(sum(pixel) / 3 for pixel in pixels) / len(pixels)
     return brightness < 135
 
 
