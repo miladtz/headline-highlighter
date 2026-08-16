@@ -5,7 +5,7 @@ from unittest.mock import patch
 
 from PIL import Image
 
-from headline_highlighter import box_is_dark, clean_drop_path, detect_headline, find_manual_headline, find_phrase_boxes, headline_quality, line_highlight_durations, marker_layer, normalise, remove_header_navigation, source_copy_destination, timestamped_destination, trim_mixed_title_lines, zoom_frame
+from headline_highlighter import box_is_dark, clean_drop_path, detect_headline, find_manual_headline, find_phrase_boxes, headline_quality, line_highlight_durations, marker_layer, normalise, remove_header_navigation, source_copy_destination, timestamped_destination, trim_mixed_title_lines, zoom_frame, zoom_scale
 
 
 class HeadlineSelectionTests(unittest.TestCase):
@@ -96,6 +96,12 @@ class HeadlineSelectionTests(unittest.TestCase):
     def test_zoom_frame_keeps_video_dimensions(self):
         image = Image.new("RGBA", (101, 99), "white")
         self.assertEqual(zoom_frame(image, (50, 40), 1.08).size, image.size)
+
+    def test_zoom_out_reverses_the_existing_zoom_motion(self):
+        self.assertEqual(zoom_scale("in", 0), 1)
+        self.assertEqual(zoom_scale("out", 1), 1)
+        self.assertAlmostEqual(zoom_scale("in", 1), 1.08)
+        self.assertAlmostEqual(zoom_scale("out", 0), 1.08)
 
     def test_phrase_matches_are_returned_in_reading_order(self):
         line = {
