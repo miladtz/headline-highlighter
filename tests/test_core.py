@@ -166,6 +166,11 @@ class HeadlineSelectionTests(unittest.TestCase):
         self.assertGreater(filled.getpixel((50, 20))[3], 0)
         self.assertEqual(outline.getpixel((50, 20))[3], 0)
 
+    def test_brush_marker_style_paints_bristles_inside_the_headline_band(self):
+        brush = marker_layer((100, 40), (10, 10, 90, 30), "#FFF200", 1, 1, 150, brush=True)
+        self.assertGreater(brush.getpixel((50, 20))[3], 0)
+        self.assertEqual(brush.getpixel((50, 3))[3], 0)
+
 
 if __name__ == "__main__":
     unittest.main()
