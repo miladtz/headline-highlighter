@@ -5,7 +5,7 @@ from unittest.mock import patch
 
 from PIL import Image
 
-from headline_highlighter import box_is_dark, clean_drop_path, detect_headline, find_manual_headline, find_phrase_boxes, headline_quality, line_highlight_durations, normalise, remove_header_navigation, source_copy_destination, timestamped_destination, zoom_frame
+from headline_highlighter import box_is_dark, clean_drop_path, detect_headline, find_manual_headline, find_phrase_boxes, headline_quality, line_highlight_durations, marker_layer, normalise, remove_header_navigation, source_copy_destination, timestamped_destination, trim_mixed_title_lines, zoom_frame
 
 
 class HeadlineSelectionTests(unittest.TestCase):
@@ -83,6 +83,16 @@ class HeadlineSelectionTests(unittest.TestCase):
         partial = complete[:1]
         self.assertGreater(headline_quality(complete), headline_quality(partial))
 
+    def test_mixed_ocr_line_drops_small_section_label_beside_headline(self):
+        mixed = {"text": "JUSTICE DEPARTMENT Woman arrested", "box": (10, 20, 520, 80), "height": 60,
+                 "words": [{"text": "JUSTICE", "box": (10, 42, 58, 54)},
+                           {"text": "DEPARTMENT", "box": (62, 42, 145, 54)},
+                           {"text": "Woman", "box": (220, 20, 370, 80)},
+                           {"text": "arrested", "box": (380, 20, 520, 80)}]}
+        trimmed = trim_mixed_title_lines([mixed])
+        self.assertEqual(trimmed[0]["text"], "Woman arrested")
+        self.assertEqual(trimmed[0]["box"], (220, 20, 520, 80))
+
     def test_zoom_frame_keeps_video_dimensions(self):
         image = Image.new("RGBA", (101, 99), "white")
         self.assertEqual(zoom_frame(image, (50, 40), 1.08).size, image.size)
@@ -144,6 +154,12 @@ class HeadlineSelectionTests(unittest.TestCase):
     def test_background_classifier_handles_light_and_dark_pages(self):
         self.assertTrue(box_is_dark(Image.new("RGBA", (20, 20), "#10233d"), (0, 0, 20, 20)))
         self.assertFalse(box_is_dark(Image.new("RGBA", (20, 20), "white"), (0, 0, 20, 20)))
+
+    def test_outline_marker_style_leaves_its_centre_unfilled(self):
+        filled = marker_layer((100, 40), (10, 10, 90, 30), "#FFF200", 1, 1, 150)
+        outline = marker_layer((100, 40), (10, 10, 90, 30), "#FFF200", 1, 1, 150, outline=True)
+        self.assertGreater(filled.getpixel((50, 20))[3], 0)
+        self.assertEqual(outline.getpixel((50, 20))[3], 0)
 
 
 if __name__ == "__main__":
