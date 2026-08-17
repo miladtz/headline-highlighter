@@ -451,6 +451,20 @@ def zoom_scale(mode: str, progress: float) -> float:
     return 1 + amount * (1 - progress if mode == "out" else progress)
 
 
+def motion_frame(image: Image.Image, focus: tuple[float, float], mode: str, progress: float) -> Image.Image:
+    """Apply the chosen smooth camera motion at the same 8% travel amount."""
+    progress = min(1.0, max(0.0, progress))
+    if mode == "down":
+        # A pan needs a small crop to reveal new content. Keep its 8% amount
+        # equal to the existing zoom movement, beginning at the top and ending
+        # at the bottom of the image.
+        scale = 1.08
+        crop_height = image.height / scale
+        center = (image.width / 2, crop_height / 2 + (image.height - crop_height) * progress)
+        return zoom_frame(image, center, scale)
+    return zoom_frame(image, focus, zoom_scale(mode, progress))
+
+
 def crop_to_16_9(image: Image.Image) -> Image.Image:
     """Center-crop an image to 16:9 without resizing its retained content."""
     width, height = image.size
@@ -507,7 +521,7 @@ def generate_video(image_path: str, lines: list[dict], title_time: float, gap: f
                     visible_box = (render_box[0], render_box[1], round(render_box[0] + (render_box[2] - render_box[0]) * f), render_box[3])
                     preserve_text_appearance(composed, image, visible_box, line_color, dark_background)
                 cursor += line_duration + (gap if n < len(lines)-1 else 0)
-            composed = zoom_frame(composed, focus, zoom_scale(zoom_mode, frame / max(1, frames - 1)))
+            composed = motion_frame(composed, focus, zoom_mode, frame / max(1, frames - 1))
             try:
                 process.stdin.write(composed.tobytes())
             except BrokenPipeError:
@@ -611,9 +625,10 @@ class App(TkinterDnD.Tk):
         ttk.Radiobutton(style_frame, text="Brush", variable=self.marker_style, value="brush").pack(side="left", padx=(8, 0))
         ttk.Radiobutton(style_frame, text="Grunge", variable=self.marker_style, value="grunge").pack(side="left", padx=(8, 0))
         zoom_options = ttk.Frame(grid); zoom_options.grid(row=3, column=2, columnspan=2, sticky="w", padx=(25, 0), pady=3)
-        ttk.Label(zoom_options, text="Zoom direction").pack(side="left", padx=(0, 8))
+        ttk.Label(zoom_options, text="Camera motion").pack(side="left", padx=(0, 8))
         ttk.Radiobutton(zoom_options, text="Zoom in", variable=self.zoom_mode, value="in").pack(side="left")
         ttk.Radiobutton(zoom_options, text="Zoom out", variable=self.zoom_mode, value="out").pack(side="left", padx=(8, 0))
+        ttk.Radiobutton(zoom_options, text="Top to bottom", variable=self.zoom_mode, value="down").pack(side="left", padx=(8, 0))
         ttk.Label(grid, text="Output filename").grid(row=4, column=0, sticky="w", pady=3)
         ttk.Entry(grid, textvariable=self.filename).grid(row=4, column=1, columnspan=3, sticky="ew", pady=3)
         ttk.Label(grid, text="Output folder").grid(row=5, column=0, sticky="w", pady=3)
